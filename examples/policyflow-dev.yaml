@@ -1,0 +1,72 @@
+# PolicyFlow 示例配置 — 开发场景（编程为主）
+#
+# 适用场景: 个人/团队开发，大量代码生成和 debug
+# 核心思路: 代码走代码模型，其他走便宜模型
+
+upstream:
+  base_url: http://localhost:3000
+  api_key: ""
+  timeout: 60
+
+embedding:
+  model: text-embedding-3-small
+  similarity_threshold: 0.75
+
+policies:
+  # 简单代码 → 便宜代码模型
+  - name: "简单代码"
+    match:
+      keywords: ["写一个", "实现", "函数", "类", "方法", "API接口",
+                 "单元测试", "加注释", "格式化代码"]
+      max_input_tokens: 500
+    route_to: "deepseek-v4-flash"
+    cascade: true
+
+  # 复杂代码 → 强代码模型
+  - name: "复杂代码与架构"
+    match:
+      keywords: ["架构设计", "重构", "性能优化", "SQL优化", "系统设计",
+                 "debug", "代码审查", "安全漏洞", "并发", "分布式"]
+    route_to: "claude-sonnet-4-6"
+
+  # AI Agent 开发 → 最强模型
+  - name: "Agent开发"
+    match:
+      keywords: ["agent", "tool call", "function calling", "多轮对话",
+                 "prompt engineering", "上下文管理"]
+    route_to: "claude-opus-4-8"
+
+  # 文档 → 便宜模型
+  - name: "文档撰写"
+    match:
+      keywords: ["README", "文档", "注释", "CHANGELOG", "API文档",
+                 "写文档", "更新文档"]
+    route_to: "deepseek-v4-flash"
+
+  # 图片理解
+  - name: "图片理解"
+    match:
+      has_image: true
+    route_to: "qwen3-vl-plus"
+
+  # 默认
+  - name: "默认"
+    match:
+      default: true
+    route_to: "deepseek-v4-pro"
+
+cascade:
+  enabled: true
+  max_retries: 2
+  escalation_chain:
+    - "deepseek-v4-flash"
+    - "deepseek-v4-pro"
+    - "claude-sonnet-4-6"
+
+modifiers:
+  agent_detection: true
+  reasoning_detection: true
+  context_window_filter: true
+  session_persistence: true
+  strongest_model: "claude-opus-4-8"
+  reasoning_model: "claude-sonnet-4-6"

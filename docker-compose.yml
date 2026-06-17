@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  # ── PolicyFlow: 策略路由中间件 ──────────────────────────────
+  policyflow:
+    build: .
+    container_name: policyflow
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./policyflow.yaml:/app/policyflow.yaml:ro
+      - policyflow-data:/app/data
+    environment:
+      - UPSTREAM_BASE_URL=http://one-api:3000
+      - UPSTREAM_API_KEY=${ONE_API_KEY:-}
+    depends_on:
+      one-api:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── one-api: 渠道管理 + 负载均衡 ────────────────────────────
+  one-api:
+    image: justsong/one-api:latest
+    container_name: one-api
+    ports:
+      - "3000:3000"
+    volumes:
+      - one-api-data:/data
+    environment:
+      - TZ=Asia/Shanghai
+      - SESSION_SECRET=${ONE_API_SESSION_SECRET:-change-me}
+    restart: unless-stopped
+
+volumes:
+  policyflow-data:
+  one-api-data:

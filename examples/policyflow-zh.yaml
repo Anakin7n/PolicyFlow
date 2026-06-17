@@ -1,0 +1,64 @@
+# PolicyFlow 示例配置 — 中文场景（团队办公）
+#
+# 适用场景: 团队日常办公，大量翻译/摘要/格式化需求
+# 核心思路: 简单任务走国产便宜模型，复杂任务走高端模型
+
+upstream:
+  base_url: http://localhost:3000
+  api_key: ""
+  timeout: 60
+
+embedding:
+  model: text-embedding-3-small
+  similarity_threshold: 0.75
+
+policies:
+  # 翻译、摘要、润色 → 最便宜
+  - name: "翻译、摘要、格式化"
+    match:
+      keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色", "总结"]
+      max_input_tokens: 800
+    route_to: "qwen3.5-flash"
+    cascade: true
+
+  # 通用办公 → 性价比
+  - name: "通用问答"
+    match:
+      keywords: ["怎么", "什么是", "如何", "解释", "推荐", "帮我"]
+    route_to: "deepseek-v4-flash"
+
+  # 代码相关 → 代码模型
+  - name: "代码生成与审查"
+    match:
+      keywords: ["写代码", "debug", "代码审查", "重构", "单元测试",
+                 "SQL", "API", "算法", "bug"]
+    route_to: "deepseek-v4-pro"
+
+  # 复杂分析 → 最强模型
+  - name: "复杂分析与推理"
+    match:
+      keywords: ["架构设计", "技术方案", "安全审计", "性能优化",
+                 "系统设计", "数学证明", "策略分析"]
+    route_to: "claude-sonnet-4-6"
+
+  # 默认
+  - name: "默认"
+    match:
+      default: true
+    route_to: "deepseek-v4-flash"
+
+cascade:
+  enabled: true
+  max_retries: 2
+  escalation_chain:
+    - "qwen3.5-flash"
+    - "deepseek-v4-flash"
+    - "claude-sonnet-4-6"
+
+modifiers:
+  agent_detection: true
+  reasoning_detection: true
+  context_window_filter: true
+  session_persistence: true
+  strongest_model: "claude-opus-4-8"
+  reasoning_model: "claude-sonnet-4-6"
