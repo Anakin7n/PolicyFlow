@@ -1,5 +1,5 @@
 # PolicyFlow configuration
-# Week 2: YAML policies + embedding classifier + routing decisions
+# Week 3: Cascade validator + smart modifiers (agent/reasoning/window/session/fallback)
 
 upstream:
   base_url: http://localhost:3000   # one-api address
@@ -45,3 +45,24 @@ policies:
     match:
       default: true
     route_to: "claude-sonnet-4-6"
+
+# Cascade validation — verify cheap-model responses, escalate on failure
+# Inspired by NadirClaw: "先让便宜模型试试，不行再换贵的"
+cascade:
+  enabled: true
+  acceptance_threshold: 0.80
+  max_retries: 2
+  escalation_chain:
+    - "claude-haiku-4-5"
+    - "claude-sonnet-4-6"
+    - "claude-opus-4-8"
+
+# Smart modifiers — rule-based checks that override routing
+modifiers:
+  agent_detection: true        # Agent请求 → 强制最强模型
+  reasoning_detection: true    # 推理任务 → reasoning模型
+  context_window_filter: true  # 超出窗口 → 自动切大窗口模型
+  session_persistence: true    # 同会话 → 固定模型
+  session_ttl: 1800            # 会话TTL (秒), 默认30分钟
+  strongest_model: "claude-opus-4-8"
+  reasoning_model: "claude-opus-4-8"

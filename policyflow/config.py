@@ -86,3 +86,15 @@ class Config:
     @property
     def policies_data(self) -> list[dict]:
         return self.data.get("policies", [])
+
+    # ── Cascade ────────────────────────────────────────────────────
+
+    @property
+    def cascade_data(self) -> dict:
+        return self.data.get("cascade", {})
+
+    # ── Modifiers ──────────────────────────────────────────────────
+
+    @property
+    def modifiers_data(self) -> dict:
+        return self.data.get("modifiers", {})
