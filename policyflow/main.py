@@ -1,18 +1,22 @@
 """PolicyFlow — FastAPI application entry point.
 
-Week 3: Cascade validator + smart modifiers (agent/reasoning/window/session/fallback).
+Week 4: SQLite logging + Dashboard + cost analysis.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.responses import StreamingResponse
 
+from . import db
 from .cascade import CascadeConfig, CascadeValidator
 from .config import Config
+from .cost import calc_compared_cost, calc_cost
+from .dashboard import router as dashboard_router
 from .models import ChatCompletionRequest, ChatCompletionResponse, ModelsResponse
 from .modifiers import ModifierEngine
 from .proxy import ProxyError, UpstreamProxy
@@ -24,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init all components. Shutdown: clean up connections."""
+    """Startup: init DB, config, and all components. Shutdown: clean up."""
+    db.init_db()
     config = Config()
     proxy = UpstreamProxy(config)
     router = Router(config)
@@ -39,6 +44,8 @@ async def lifespan(app: FastAPI):
     app.state.cascade = cascade
     app.state.modifiers = modifiers
 
+    logger.info("PolicyFlow v0.4.0 started — Dashboard at /dashboard")
+
     try:
         yield
     finally:
@@ -48,10 +55,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PolicyFlow",
-    description='策略路由中间件，给 one-api 装上「什么请求用什么模型」的大脑 — Week 3: cascade + modifiers',
-    version="0.3.0",
+    description='策略路由中间件，给 one-api 装上「什么请求用什么模型」的大脑 — Week 4: dashboard + costs',
+    version="0.4.0",
     lifespan=lifespan,
 )
+
+app.include_router(dashboard_router)
 
 
 # ── OpenAI-compatible endpoints ──────────────────────────────────────
@@ -61,21 +70,18 @@ async def chat_completions(
     request: ChatCompletionRequest,
     fastapi_request: FastAPIRequest,
 ):
-    """Chat completions with full policy routing, modifiers, and cascade validation.
-
-    Flow:
-    1. Modifiers (agent/reasoning/session/context-window) → may override model
-    2. Policy router (keywords + embedding) → pick target model
-    3. Forward upstream
-    4. Cascade validate → if cheap model failed, escalate and retry
-    """
+    """Chat completions with full pipeline: modifiers → router → cascade → log."""
     router: Router = app.state.router
     proxy: UpstreamProxy = app.state.proxy
     cascade: CascadeValidator = app.state.cascade
     modifiers: ModifierEngine = app.state.modifiers
 
+    t_start = time.time()
     original_model = request.model
     session_id = fastapi_request.headers.get("X-Session-ID")
+    user = fastapi_request.headers.get("X-User", "default")
+    cascade_attempts = 0
+    success = True
 
     # ── Step 1: Modifiers (pre-routing overrides) ──────────────────
     modifier_result = modifiers.run(request, session_id)
@@ -102,51 +108,113 @@ async def chat_completions(
     modifiers.persist_session(session_id, request.model)
 
     # ── Step 4: Forward + cascade ──────────────────────────────────
-    if request.stream:
-        # Streaming: skip cascade (can't validate mid-stream)
-        return _stream_response(proxy, request, route_policy_name, route_method, route_score)
+    try:
+        if request.stream:
+            response = None  # Streaming: can't extract usage for logging
+            return _stream_response(proxy, request, route_policy_name, route_method, route_score)
+        else:
+            response, cascade_attempts = await _forward_with_cascade(
+                proxy, cascade, request
+            )
+    except HTTPException:
+        success = False
+        raise
+    finally:
+        # ── Step 5: Log to database ────────────────────────────────
+        duration_ms = int((time.time() - t_start) * 1000)
+        _log_to_db(
+            user=user,
+            original_model=original_model,
+            routed_model=request.model,
+            policy_name=route_policy_name,
+            method=route_method,
+            score=route_score,
+            response=response,
+            cascade_attempts=cascade_attempts,
+            duration_ms=duration_ms,
+            success=success,
+        )
 
-    return await _forward_with_cascade(
-        proxy, cascade, request, route_policy_name, route_method, route_score
-    )
+    return response
+
+
+def _log_to_db(
+    user: str,
+    original_model: str,
+    routed_model: str,
+    policy_name: str,
+    method: str,
+    score: float,
+    response: ChatCompletionResponse | None,
+    cascade_attempts: int,
+    duration_ms: int,
+    success: bool,
+) -> None:
+    """Record the request and its costs to SQLite."""
+    prompt_tokens = 0
+    completion_tokens = 0
+
+    if response and response.usage:
+        prompt_tokens = response.usage.prompt_tokens
+        completion_tokens = response.usage.completion_tokens
+
+    estimated_cost = calc_cost(routed_model, prompt_tokens, completion_tokens)
+    compared_cost = calc_compared_cost(prompt_tokens, completion_tokens)
+
+    try:
+        db.log_request(
+            user=user,
+            original_model=original_model,
+            routed_model=routed_model,
+            policy_name=policy_name,
+            method=method,
+            similarity_score=score,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            estimated_cost=estimated_cost,
+            compared_cost=compared_cost,
+            cascade_attempts=cascade_attempts,
+            duration_ms=duration_ms,
+            success=success,
+        )
+    except Exception as exc:
+        logger.warning("Failed to log request: %s", exc)
 
 
 async def _forward_with_cascade(
     proxy: UpstreamProxy,
     cascade: CascadeValidator,
     request: ChatCompletionRequest,
-    policy_name: str,
-    method: str,
-    score: float,
-) -> ChatCompletionResponse:
-    """Forward request with cascade escalation on validation failure."""
+) -> tuple[ChatCompletionResponse, int]:
+    """Forward request with cascade escalation on validation failure.
+
+    Returns (response, cascade_attempts).
+    """
     max_attempts = cascade.config.max_retries + 1
-    last_error: str | None = None
+    cascade_attempts = 0
 
     for attempt in range(max_attempts):
         current_model = request.model
 
-        # Try forwarding
         try:
             response = await proxy.chat_completion(request)
         except ProxyError as e:
-            last_error = str(e)
             logger.warning("Upstream error (attempt %d): %s", attempt + 1, e)
-            # Fallback: try next model on connection/HTTP error
             next_model = cascade.get_next_model(current_model)
             if next_model and attempt < max_attempts - 1:
                 request.model = next_model
+                cascade_attempts += 1
                 logger.info("Fallback: %s → %s", current_model, next_model)
                 continue
-            raise HTTPException(status_code=502, detail=last_error or "Upstream error")
+            raise HTTPException(status_code=502, detail=str(e))
 
-        # Cascade validation (only for cascade-enabled policies)
+        # Cascade validation
         if not cascade.config.enabled:
-            return response
+            return response, cascade_attempts
 
         validation = cascade.validate(response, request)
         if validation.passed:
-            return response
+            return response, cascade_attempts
 
         logger.info(
             "Cascade fail [%s]: %s → escalating (attempt %d/%d)",
@@ -155,15 +223,12 @@ async def _forward_with_cascade(
 
         next_model = cascade.get_next_model(current_model)
         if not next_model or attempt >= max_attempts - 1:
-            # No more escalation options — return the response as-is
             logger.warning("Cascade exhausted, returning last response from %s", current_model)
-            return response
+            return response, cascade_attempts
 
         request.model = next_model
-        method = "cascade"
-        policy_name = f"cascade:{current_model}"
+        cascade_attempts += 1
 
-    # Should never reach here, but type checker needs this
     raise HTTPException(status_code=502, detail="All cascade attempts failed")
 
 
