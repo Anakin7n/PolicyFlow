@@ -1,0 +1,7 @@
+# PolicyFlow configuration — Week 1: upstream proxy only
+# Later weeks will add policies, cascade, modifiers, budget sections.
+
+upstream:
+  base_url: http://localhost:3000   # one-api address
+  api_key: ""                        # one-api API key (or set UPSTREAM_API_KEY env)
+  timeout: 60
