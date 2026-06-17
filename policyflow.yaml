@@ -1,7 +1,47 @@
-# PolicyFlow configuration — Week 1: upstream proxy only
-# Later weeks will add policies, cascade, modifiers, budget sections.
+# PolicyFlow configuration
+# Week 2: YAML policies + embedding classifier + routing decisions
 
 upstream:
   base_url: http://localhost:3000   # one-api address
   api_key: ""                        # one-api API key (or set UPSTREAM_API_KEY env)
   timeout: 60
+
+# Embedding API for policy classification
+embedding:
+  base_url: ""                       # defaults to upstream base_url if empty
+  api_key: ""                        # defaults to upstream api_key if empty
+  model: text-embedding-3-small
+  similarity_threshold: 0.75
+  timeout: 30
+
+# Routing policies — first match wins, then default
+policies:
+  - name: "翻译、摘要、格式化"
+    match:
+      keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色"]
+      max_input_tokens: 800
+    route_to: "claude-haiku-4-5"
+    cascade: true
+
+  - name: "代码生成与审查"
+    match:
+      keywords: ["写代码", "debug", "代码审查", "重构", "单元测试",
+                 "SQL查询", "API接口", "算法实现", "修bug"]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "复杂推理与分析"
+    match:
+      keywords: ["数学证明", "架构设计", "策略分析", "技术方案",
+                 "安全审计", "性能优化", "系统设计"]
+      min_input_tokens: 200
+    route_to: "claude-opus-4-8"
+
+  - name: "图片理解"
+    match:
+      has_image: true
+    route_to: "gpt-4o"
+
+  - name: "默认"
+    match:
+      default: true
+    route_to: "claude-sonnet-4-6"

@@ -56,3 +56,33 @@ class Config:
     @property
     def upstream_timeout(self) -> int:
         return self.data["upstream"]["timeout"]
+
+    # ── Embedding ─────────────────────────────────────────────────
+
+    @property
+    def embedding_base_url(self) -> str:
+        url = self.data.get("embedding", {}).get("base_url", "")
+        return url or self.upstream_base_url
+
+    @property
+    def embedding_api_key(self) -> str:
+        key = self.data.get("embedding", {}).get("api_key", "")
+        return key or self.upstream_api_key
+
+    @property
+    def embedding_model(self) -> str:
+        return self.data.get("embedding", {}).get("model", "text-embedding-3-small")
+
+    @property
+    def embedding_threshold(self) -> float:
+        return float(self.data.get("embedding", {}).get("similarity_threshold", 0.75))
+
+    @property
+    def embedding_timeout(self) -> int:
+        return int(self.data.get("embedding", {}).get("timeout", 30))
+
+    # ── Policies ──────────────────────────────────────────────────
+
+    @property
+    def policies_data(self) -> list[dict]:
+        return self.data.get("policies", [])

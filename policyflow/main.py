@@ -1,10 +1,11 @@
 """PolicyFlow — FastAPI application entry point.
 
-Week 1: OpenAI-compatible proxy that forwards requests upstream.
+Week 2: Policy engine + embedding classifier + routing decisions.
 """
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -13,23 +14,35 @@ from fastapi.responses import StreamingResponse
 from .config import Config
 from .models import ChatCompletionRequest, ChatCompletionResponse, ModelsResponse
 from .proxy import ProxyError, UpstreamProxy
+from .router import Router
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup/shutdown: initialize and clean up the upstream proxy client."""
-    app.state.config = Config()
-    app.state.proxy = UpstreamProxy(app.state.config)
+    """Startup: init config, proxy, router. Shutdown: clean up connections."""
+    config = Config()
+    proxy = UpstreamProxy(config)
+    router = Router(config)
+    await router.initialize()
+
+    app.state.config = config
+    app.state.proxy = proxy
+    app.state.router = router
+
     try:
         yield
     finally:
-        await app.state.proxy.close()
+        await router.close()
+        await proxy.close()
 
 
 app = FastAPI(
     title="PolicyFlow",
-    description='策略路由中间件，给 one-api 装上「什么请求用什么模型」的大脑 — Week 1: proxy skeleton',
-    version="0.1.0",
+    description='策略路由中间件，给 one-api 装上「什么请求用什么模型」的大脑 — Week 2: policy routing',
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -40,9 +53,20 @@ app = FastAPI(
 async def chat_completions(request: ChatCompletionRequest):
     """OpenAI-compatible chat completions endpoint.
 
-    For now (Week 1), forwards directly upstream without policy routing.
+    Week 2: Policy routing — classifies the request and rewrites the model
+    before forwarding upstream.
     """
+    router: Router = app.state.router
     proxy: UpstreamProxy = app.state.proxy
+
+    # ── Policy routing ────────────────────────────────────────────
+    decision = await router.route(request)
+    original_model = request.model
+    request.model = decision.target_model
+    logger.info(
+        "Route: %s → %s  [%s, %.3f]",
+        original_model, decision.target_model, decision.method, decision.score,
+    )
 
     try:
         if request.stream:
@@ -53,6 +77,9 @@ async def chat_completions(request: ChatCompletionRequest):
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
                     "X-Accel-Buffering": "no",
+                    "X-PolicyFlow-Policy": decision.policy.name if decision.policy else "none",
+                    "X-PolicyFlow-Method": decision.method,
+                    "X-PolicyFlow-Score": f"{decision.score:.3f}",
                 },
             )
         return await proxy.chat_completion(request)
