@@ -14,13 +14,59 @@ import argparse
 import asyncio
 import csv
 import json
-import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
+import pyfiglet
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich import box
+
+console = Console(highlight=False)
+
+
+def _logo() -> str:
+    """Big ASCII logo via pyfiglet."""
+    return pyfiglet.figlet_format("PolicyFlow", font="big")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Chart helpers
+# ══════════════════════════════════════════════════════════════════════
+
+def _bar(items: list[tuple[str, float]], max_w: int = 44) -> Text:
+    """Colored horizontal bar chart."""
+    if not items:
+        return Text("(no data)\n", style="dim")
+    max_v = max(v for _, v in items) or 1
+    out = Text()
+    colors = ["green", "cyan", "yellow", "magenta", "blue", "red"]
+    for i, (label, val) in enumerate(items):
+        w = max(1, int(val / max_v * max_w))
+        color = colors[i % len(colors)]
+        out.append(f"  {label:<22} ", style="dim")
+        out.append("#" * w, style=color)
+        out.append(f" {val:,.2f}\n")
+    return out
+
+
+def _spark(values: list[float], width: int = 40) -> str:
+    """Sparkline using ASCII-safe characters."""
+    if not values:
+        return "(no data)"
+    lo, hi = min(values), max(values)
+    span = hi - lo or 1
+    chars = ".,-:=+*#@"
+    return "".join(chars[min(len(chars)-1, int((v-lo)/span*(len(chars)-1)))] for v in values[-width:])
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Parse helpers
+# ══════════════════════════════════════════════════════════════════════
 
 def parse_duration(s: str) -> int:
-    """Convert '7d' / '30d' / '1m' to number of days."""
     s = s.strip().lower()
     if s.endswith("d"):
         return max(1, int(s[:-1]))
@@ -29,43 +75,39 @@ def parse_duration(s: str) -> int:
     return 30
 
 
+# ══════════════════════════════════════════════════════════════════════
+# Entry point
+# ══════════════════════════════════════════════════════════════════════
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="policyflow",
-        description="PolicyFlow — 策略路由中间件 CLI",
-    )
+    parser = argparse.ArgumentParser(prog="policyflow", description="PolicyFlow CLI")
     subparsers = parser.add_subparsers(dest="command")
 
-    # ── serve ────────────────────────────────────────────────
     p = subparsers.add_parser("serve", help="启动 PolicyFlow 服务")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--reload", action="store_true", default=False)
 
-    # ── report ───────────────────────────────────────────────
     p = subparsers.add_parser("report", help="查看成本分析报告")
     p.add_argument("--since", default="30d", help="统计周期 (7d/30d/1m)")
     p.add_argument("--by-model", action="store_true", help="按模型拆分")
     p.add_argument("--by-day", action="store_true", help="按日期拆分")
 
-    # ── classify ─────────────────────────────────────────────
     p = subparsers.add_parser("classify", help="测试策略路由")
     p.add_argument("prompt", help="要测试的 prompt 文本")
 
-    # ── export ───────────────────────────────────────────────
     p = subparsers.add_parser("export", help="导出日志数据")
     p.add_argument("--format", choices=["csv", "json"], default="csv")
     p.add_argument("--since", default="30d")
     p.add_argument("--output", default="-", help="输出文件 (默认 stdout)")
 
-    # ── optimize ─────────────────────────────────────────────
     p = subparsers.add_parser("optimize", help="AI 优化建议")
     p.add_argument("--since", default="30d")
     p.add_argument("--dry-run", action="store_true", default=True,
                    help="仅打印建议，不修改文件 (默认)")
 
     args = parser.parse_args()
-
+    console.clear()
     if args.command == "serve":
         cmd_serve(args)
     elif args.command == "report":
@@ -82,115 +124,67 @@ def main() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Command implementations
+# serve
 # ══════════════════════════════════════════════════════════════════════
 
 def cmd_serve(args) -> None:
-    """Start the PolicyFlow FastAPI server."""
     import uvicorn
-    print(f"PolicyFlow v0.5.0 starting at http://{args.host}:{args.port}")
+    console.print(_logo(), style="bold cyan")
+    console.print("  Poli the Route-Owl   |   v0.5.0   |   策略路由中间件")
+    console.print(f"  [cyan]http://{args.host}:{args.port}[/cyan]")
+    console.print(f"  [dim]API Docs: http://{args.host}:{args.port}/docs[/dim]")
+    console.print()
     uvicorn.run("policyflow.main:app", host=args.host, port=args.port,
-                reload=args.reload)
+                reload=args.reload, log_level="info")
 
+
+# ══════════════════════════════════════════════════════════════════════
+# report — full-screen CLI Dashboard
+# ══════════════════════════════════════════════════════════════════════
 
 def cmd_report(args) -> None:
-    """Print cost analysis report."""
     from . import db
+    from .dashboard_tui import run_dashboard
+
     days = parse_duration(args.since)
-
     if args.by_day:
-        data = db.query_daily_costs(days)
-        if not data:
-            print("(no data)")
-            return
-        print(f"\n  每日成本 (最近 {days} 天)")
-        print(f"  {'日期':<12} {'请求数':>8} {'实际花费':>10} {'对比花费':>10} {'节省':>10}")
-        print(f"  {'-'*50}")
-        total_actual = 0
-        total_compared = 0
-        for r in data:
-            saved = r["compared_cost"] - r["actual_cost"]
-            print(f"  {r['day']:<12} {r['requests']:>8} ${r['actual_cost']:>9.2f} ${r['compared_cost']:>9.2f} ${saved:>9.2f}")
-            total_actual += r["actual_cost"]
-            total_compared += r["compared_cost"]
-        print(f"  {'─'*50}")
-        print(f"  {'合计':<12} {'':>8} ${total_actual:>9.2f} ${total_compared:>9.2f} ${total_compared - total_actual:>9.2f}")
+        _daily_view(days)
         return
 
-    summary = db.query_summary(days)
-    policies = db.query_policy_breakdown(days)
-    cascade = db.query_cascade_stats(days)
-
-    print(f"\n  PolicyFlow 成本报告")
-    print(f"  {'─'*50}")
-    print(f"  周期:      最近 {days} 天")
-    print(f"  总请求:    {summary['total_requests']:,}")
-    print(f"  总花费:    ${summary['total_cost']:,.2f}")
-    s = summary["saved_amount"]
-    pct = summary["saved_pct"]
-    print(f"  如果全用 Pro: ${summary['compared_cost']:,.2f}")
-    print(f"  节省:      ${s:,.2f} ({pct}%)")
-
-    if args.by_model:
-        _report_by_model(days)
-    else:
-        print(f"\n  按策略拆分")
-        print(f"  {'策略':<25} {'请求数':>6} {'花费':>8} {'节省':>8} {'占比':>6}")
-        print(f"  {'-'*55}")
-        for p in policies:
-            saved = p["saved"]
-            print(f"  {p['policy']:<25} {p['requests']:>6} ${p['cost']:>7.2f} ${saved:>7.2f} {p['pct']:>5.1f}%")
-
-        print(f"\n  级联统计")
-        print(f"  便宜模型尝试: {cascade['total_requests']}")
-        print(f"  验证通过:     {cascade['direct_success']} ({cascade['direct_pct']}%)")
-        print(f"  升级到更强:   {cascade['cascade_attempts']} ({cascade['cascade_pct']}%)")
-        if cascade["failed"]:
-            print(f"  失败:         {cascade['failed']}")
-
-    # Optimization tips (heuristic, for quick feedback)
-    tips = []
-    if pct < 10:
-        tips.append("节省比例偏低 (<10%)，建议检查策略是否过于保守")
-    cpct = cascade["cascade_pct"]
-    if cpct > 15:
-        tips.append(f"级联升级率偏高 ({cpct}%)，部分策略的便宜模型可能不够胜任")
-    high = next((p for p in policies if p["pct"] > 60), None)
-    if high:
-        tips.append(f"策略「{high['policy']}」占了 {high['pct']}% 成本，建议检查优化空间")
-    if tips:
-        print(f"\n  >> 优化提示")
-        for t in tips:
-            print(f"  - {t}")
-    print()
+    # Launch full-screen TUI dashboard
+    run_dashboard(db, days)
 
 
-def _report_by_model(days: int) -> None:
-    """Print report grouped by routed model."""
+def _daily_view(days: int) -> None:
     from . import db
-    conn = db.get_db()
-    rows = conn.execute(
-        """SELECT routed_model,
-                  COUNT(*) as requests,
-                  COALESCE(SUM(estimated_cost), 0) as cost
-           FROM requests
-           WHERE timestamp >= date('now', ? || ' days')
-           GROUP BY routed_model ORDER BY cost DESC""",
-        (f"-{days}",),
-    ).fetchall()
-    conn.close()
-    if not rows:
-        print("(no data)")
+    daily = db.query_daily_costs(days)
+    if not daily:
+        console.print("[dim](no data)[/dim]")
         return
-    print(f"\n  按模型拆分")
-    print(f"  {'模型':<30} {'请求数':>6} {'花费':>8}")
-    print(f"  {'-'*46}")
-    for r in rows:
-        print(f"  {r['routed_model']:<30} {r['requests']:>6} ${r['cost']:>7.2f}")
 
+    console.print("[bold]每日成本柱状图[/bold]\n")
+    all_vals = [d["actual_cost"] for d in daily] + [d["compared_cost"] for d in daily]
+    max_v = max(all_vals) if all_vals else 1
+    bar_w = 40
+
+    for d in daily:
+        day = d["day"][5:]
+        aw = max(1, int(d["actual_cost"] / max_v * bar_w))
+        cw = max(1, int(d["compared_cost"] / max_v * bar_w))
+        console.print(f"  [dim]{day}[/dim]  [green]{'#'*aw}[/green] ${d['actual_cost']:.2f}")
+        console.print(f"       [red]{'#'*cw}[/red] ${d['compared_cost']:.2f}\n")
+
+    total_actual = sum(d["actual_cost"] for d in daily)
+    total_compared = sum(d["compared_cost"] for d in daily)
+    console.print(f"  [bold]合计  实际 ${total_actual:.2f}  |  对比 ${total_compared:.2f}  |  节省 ${total_compared - total_actual:.2f}[/bold]")
+    console.print()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# classify
+# ══════════════════════════════════════════════════════════════════════
 
 def cmd_classify(args) -> None:
-    """Test policy routing for a prompt."""
     from .config import Config
     from .router import Router
     from .models import ChatCompletionRequest, Message
@@ -206,24 +200,34 @@ def cmd_classify(args) -> None:
                 messages=[Message(role="user", content=args.prompt)],
             )
             decision = await router.route(req)
-            policy_name = decision.policy.name if decision.policy else "none"
-            print(f"  匹配策略: {policy_name}")
-            print(f"  路由方法: {decision.method}")
-            print(f"  目标模型: {decision.target_model}")
-            print(f"  相似度:   {decision.score:.3f}")
+
+            console.print(_logo(), style="bold cyan")
+            console.print("  [bold cyan]路由测试[/bold cyan]\n")
+
+            table = Table(box=box.SIMPLE, border_style="dim", show_header=False)
+            table.add_column("k", style="cyan", width=12)
+            table.add_column("v", style="white")
+            table.add_row("匹配策略", decision.policy.name if decision.policy else "none")
+            table.add_row("路由方法", decision.method)
+            table.add_row("目标模型", decision.target_model)
+            table.add_row("相似度", f"{decision.score:.3f}")
             if decision.policy:
                 provider = config.get_model_provider(decision.target_model)
                 if provider:
                     cfg = config.get_provider_config(provider)
-                    print(f"  供应商:   {provider} ({cfg['base_url']})")
+                    table.add_row("供应商", f"{provider} ({cfg['base_url']})")
+            console.print(table)
         finally:
             await router.close()
 
     asyncio.run(_run())
 
 
+# ══════════════════════════════════════════════════════════════════════
+# export
+# ══════════════════════════════════════════════════════════════════════
+
 def cmd_export(args) -> None:
-    """Export log data to CSV or JSON."""
     from . import db
     days = parse_duration(args.since)
     rows = db.query_export(days)
@@ -241,17 +245,20 @@ def cmd_export(args) -> None:
         elif rows:
             json.dump(rows, out, indent=2, ensure_ascii=False, default=str)
         else:
-            print("(no data)", file=out)
+            console.print("[dim](no data)[/dim]")
     finally:
         if out is not sys.stdout:
             out.close()
 
     if args.output != "-":
-        print(f"导出 {len(rows)} 条记录到 {args.output}")
+        console.print(f"[green]导出 {len(rows)} 条记录到 {args.output}[/green]")
 
+
+# ══════════════════════════════════════════════════════════════════════
+# optimize
+# ══════════════════════════════════════════════════════════════════════
 
 def cmd_optimize(args) -> None:
-    """Generate AI optimization suggestions."""
     from .config import Config
     from .proxy import UpstreamProxy
     from .optimizer import generate_optimizations
@@ -261,31 +268,31 @@ def cmd_optimize(args) -> None:
     proxy = UpstreamProxy(config)
 
     async def _run():
+        console.print(_logo(), style="bold cyan")
+        console.print("  [bold cyan]AI 优化分析[/bold cyan]\n")
+        console.print("  [dim]正在分析日志数据...[/dim]\n")
+
         result = await generate_optimizations(config, proxy, days=days)
         await proxy.close()
 
         if not result.suggestions:
-            print("\n  没有生成优化建议。")
-            if result.raw_response:
-                print(f"  原始响应: {result.raw_response[:500]}")
+            console.print("  [dim]没有生成优化建议。[/dim]")
             return
 
-        print(f"\n  AI 优化建议 (分析最近 {result.period})")
-        print(f"  {'='*60}")
         for i, s in enumerate(result.suggestions, 1):
-            print(f"\n  ┌─ 建议 {i}: {s.title} ({s.risk} risk)")
-            print(f"  ├─ 类型: {s.kind}")
-            print(f"  ├─ 说明: {s.description}")
+            risk_style = {"low": "green", "medium": "yellow", "high": "red"}.get(s.risk, "dim")
+            body = Text()
+            body.append(f"{s.title}\n\n", style="bold white")
+            body.append(f"类型: {s.kind}  |  风险: ", style="dim")
+            body.append(f"{s.risk}  |  ", style=risk_style)
+            body.append(f"预计每月节省: ${s.estimated_savings_monthly:.2f}\n\n", style="dim")
+            body.append(f"{s.description}\n\n")
             if s.yaml_snippet:
-                print(f"  ├─ YAML 片段:")
-                for line in s.yaml_snippet.strip().split("\n"):
-                    print(f"  │  {line}")
-            print(f"  └─ 预计每月节省: ${s.estimated_savings_monthly:.2f}")
+                body.append(s.yaml_snippet, style="cyan")
+                body.append("\n")
+            console.print(Panel(body, border_style=risk_style, title=f"建议 {i}"))
 
-        print(f"\n  {'='*60}")
-        print(f"  >> 汇总: 执行以上建议，预计每月节省 ${result.total_estimated_savings:.2f}")
-        if args.dry_run:
-            print(f"  (dry-run 模式，未修改文件)")
-        print()
+        console.print(f"\n  [bold]>> 汇总: 预计每月节省 ${result.total_estimated_savings:.2f}[/bold]")
+        console.print(f"  [dim](dry-run 模式，未修改文件)[/dim]\n")
 
     asyncio.run(_run())

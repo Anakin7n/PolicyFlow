@@ -18,8 +18,10 @@ PolicyFlow 是一个独立的 OpenAI 兼容代理，借鉴 [NadirClaw](https://g
   └── ⑤ 成本记录 ──── SQLite 记录每次路由决策、花费、judge 反馈
 
 CLI 工具：
-  policyflow report   → 成本报告
+  policyflow report   → 全屏 TUI 仪表盘
+  policyflow classify → 测试路由
   policyflow optimize → AI 优化建议
+  policyflow export   → 导出日志
 ```
 
 ## 快速开始
@@ -110,21 +112,32 @@ docker compose up -d
 
 > 无需启动服务，直接运行即可。如果用了虚拟环境，先激活：`.venv\Scripts\activate`（Windows）或 `source .venv/bin/activate`（Linux/Mac）。
 
+### report——全屏仪表盘
+
+接管整个终端，左侧 Stats 面板，右侧柱状图（策略分布 + 供应商模型分段），底部请求明细表格。按 `Q` 退出：
+
 ```bash
-# 查看成本报告
 python -m policyflow report
 python -m policyflow report --since 7d
-python -m policyflow report --by-model
-python -m policyflow report --by-day
+python -m policyflow report --by-day  # 每日柱状图对比模式
+```
 
-# 测试路由
+### classify——测试路由
+
+```bash
 python -m policyflow classify "帮我写一个排序算法"
+```
 
-# 导出日志
+### export——导出日志
+
+```bash
 python -m policyflow export --format csv --since 7d --output report.csv
 python -m policyflow export --format json
+```
 
-# AI 优化建议
+### optimize——AI 优化建议
+
+```bash
 python -m policyflow optimize --dry-run
 ```
 
@@ -290,20 +303,21 @@ X-PolicyFlow-Score: 1.000
 ```
 PolicyFlow/
 ├── policyflow/
-│   ├── main.py          # FastAPI 入口
-│   ├── config.py        # YAML 配置加载 + provider 解析
-│   ├── models.py        # OpenAI 兼容数据模型
-│   ├── proxy.py         # 上游转发代理（多 provider client）
-│   ├── policy.py        # 策略数据模型
-│   ├── classifier.py    # Embedding 分类器
-│   ├── router.py        # 路由决策引擎
-│   ├── modifiers.py     # 6 个智能修饰器
-│   ├── cascade.py       # 级联验证器 + LLM-as-Judge
-│   ├── db.py            # SQLite 日志层
-│   ├── cost.py          # 33 个模型定价
-│   ├── optimizer.py     # AI 优化建议引擎
-│   ├── cli.py           # CLI 命令（serve/report/classify/export/optimize）
-│   └── __main__.py      # python -m policyflow 入口
+│   ├── main.py           # FastAPI 入口
+│   ├── config.py         # YAML 配置加载 + provider 解析
+│   ├── models.py         # OpenAI 兼容数据模型
+│   ├── proxy.py          # 上游转发代理（多 provider client）
+│   ├── policy.py         # 策略数据模型
+│   ├── classifier.py     # Embedding 分类器
+│   ├── router.py         # 路由决策引擎
+│   ├── modifiers.py      # 6 个智能修饰器
+│   ├── cascade.py        # 级联验证器 + LLM-as-Judge
+│   ├── db.py             # SQLite 日志层
+│   ├── cost.py           # 33 个模型定价
+│   ├── optimizer.py      # AI 优化建议引擎
+│   ├── dashboard_tui.py  # 全屏 TUI 仪表盘（textual）
+│   ├── cli.py            # CLI 命令（serve/report/classify/export/optimize）
+│   └── __main__.py       # python -m policyflow 入口
 ├── examples/
 │   ├── policyflow-zh.yaml   # 中文办公场景
 │   └── policyflow-dev.yaml  # 开发场景
