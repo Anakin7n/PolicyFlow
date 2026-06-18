@@ -147,6 +147,18 @@ class Config:
     def cascade_data(self) -> dict:
         return self.data.get("cascade", {})
 
+    # ── Logging ───────────────────────────────────────────────────
+
+    @property
+    def log_prompt_preview(self) -> bool:
+        return bool(self.data.get("logging", {}).get("log_prompt_preview", False))
+
+    # ── Optimizer ─────────────────────────────────────────────────
+
+    @property
+    def optimizer_data(self) -> dict:
+        return self.data.get("optimizer", {})
+
     # ── Modifiers ──────────────────────────────────────────────────
 
     @property

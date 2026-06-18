@@ -65,6 +65,9 @@ policies:
 # Inspired by NadirClaw: "先让便宜模型试试，不行再换贵的"
 cascade:
   enabled: true
+  verifier: rule_only           # rule_only | llm_judge | rule_then_llm
+  judge_model: ""               # Model for LLM-as-Judge (empty = disabled)
+  judge_prompt_template: ""     # Custom judge prompt (empty = use default)
   acceptance_threshold: 0.80
   max_retries: 2
   escalation_chain:

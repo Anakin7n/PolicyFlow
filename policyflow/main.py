@@ -13,10 +13,11 @@ from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.responses import StreamingResponse
 
 from . import db
+from .db import hash_prompt
 from .cascade import CascadeConfig, CascadeValidator
 from .config import Config
 from .cost import calc_compared_cost, calc_cost
-from .models import ChatCompletionRequest, ChatCompletionResponse, ModelsResponse
+from .models import ChatCompletionRequest, ChatCompletionResponse, Message, ModelsResponse
 from .modifiers import ModifierEngine
 from .proxy import ProxyError, UpstreamProxy
 from .router import Router
@@ -32,7 +33,29 @@ async def lifespan(app: FastAPI):
     config = Config()
     proxy = UpstreamProxy(config)
     router = Router(config)
-    cascade = CascadeValidator(CascadeConfig(**config.cascade_data))
+    cascade_config = CascadeConfig(**config.cascade_data)
+    cascade = CascadeValidator(cascade_config)
+
+    # Build LLM-as-Judge function if configured
+    judge_fn = None
+    if cascade_config.verifier in ("llm_judge", "rule_then_llm") and cascade_config.judge_model:
+        async def _judge(prompt: str, response_text: str) -> tuple[bool, str]:
+            judge_req = ChatCompletionRequest(
+                model=cascade_config.judge_model,
+                messages=[Message(role="user", content=cascade_config.judge_prompt.format(
+                    prompt=prompt[:4000], response=response_text[:4000]
+                ))],
+            )
+            try:
+                jr = await proxy.chat_completion(judge_req)
+                text = (jr.choices[0].message.content or "").strip()
+                passed = text.upper().startswith("PASS")
+                reason = "" if passed else text[5:].strip()[:200] if text.startswith("FAIL") else text[:200]
+                return passed, reason
+            except Exception:
+                return True, "judge_error"
+        judge_fn = _judge
+        cascade = CascadeValidator(cascade_config, judge_fn=judge_fn)
     modifiers = ModifierEngine(config.modifiers_data)
 
     await router.initialize()
@@ -73,9 +96,17 @@ async def chat_completions(
     proxy: UpstreamProxy = app.state.proxy
     cascade: CascadeValidator = app.state.cascade
     modifiers: ModifierEngine = app.state.modifiers
+    config: Config = app.state.config
 
     t_start = time.time()
     original_model = request.model
+
+    # Hash the last user message for logging
+    last_msg = request.messages[-1].content if request.messages else ""
+    prompt_text = last_msg if isinstance(last_msg, str) else str(last_msg)
+    prompt_hash_val = hash_prompt(prompt_text) if prompt_text else ""
+    prompt_preview_val = prompt_text[:500] if config.log_prompt_preview else ""
+    judge_reason_val = ""
     session_id = fastapi_request.headers.get("X-Session-ID")
     user = fastapi_request.headers.get("X-User", "default")
     cascade_attempts = 0
@@ -112,7 +143,7 @@ async def chat_completions(
             provider_name = proxy.config.get_model_provider(request.model)
             return _stream_response(proxy, request, provider_name, route_policy_name, route_method, route_score)
         else:
-            response, cascade_attempts = await _forward_with_cascade(
+            response, cascade_attempts, judge_reason_val = await _forward_with_cascade(
                 proxy, cascade, request
             )
     except HTTPException:
@@ -132,6 +163,9 @@ async def chat_completions(
             cascade_attempts=cascade_attempts,
             duration_ms=duration_ms,
             success=success,
+            prompt_hash=prompt_hash_val,
+            prompt_preview=prompt_preview_val,
+            judge_reason=judge_reason_val,
         )
 
     return response
@@ -148,6 +182,9 @@ def _log_to_db(
     cascade_attempts: int,
     duration_ms: int,
     success: bool,
+    prompt_hash: str = "",
+    prompt_preview: str = "",
+    judge_reason: str = "",
 ) -> None:
     """Record the request and its costs to SQLite."""
     prompt_tokens = 0
@@ -175,6 +212,9 @@ def _log_to_db(
             cascade_attempts=cascade_attempts,
             duration_ms=duration_ms,
             success=success,
+            prompt_hash=prompt_hash,
+            prompt_preview=prompt_preview,
+            judge_reason=judge_reason,
         )
     except Exception as exc:
         logger.warning("Failed to log request: %s", exc)
@@ -184,13 +224,15 @@ async def _forward_with_cascade(
     proxy: UpstreamProxy,
     cascade: CascadeValidator,
     request: ChatCompletionRequest,
-) -> tuple[ChatCompletionResponse, int]:
+) -> tuple[ChatCompletionResponse, int, str]:
     """Forward request with cascade escalation on validation failure.
 
-    Returns (response, cascade_attempts).
+    Returns (response, cascade_attempts, judge_reason).
     """
     max_attempts = cascade.config.max_retries + 1
     cascade_attempts = 0
+    judge_reason = ""
+    verifier = cascade.config.verifier
 
     for attempt in range(max_attempts):
         current_model = request.model
@@ -208,26 +250,47 @@ async def _forward_with_cascade(
                 continue
             raise HTTPException(status_code=502, detail=str(e))
 
-        # Cascade validation
+        # ── Rule-based validation (skip if verifier is llm_judge-only) ──
+        if verifier != "llm_judge":
+            validation = cascade.validate(response, request)
+            if not validation.passed:
+                logger.info(
+                    "Cascade fail [%s]: %s → escalating (attempt %d/%d)",
+                    validation.reason, current_model, attempt + 1, max_attempts,
+                )
+                next_model = cascade.get_next_model(current_model)
+                if not next_model or attempt >= max_attempts - 1:
+                    logger.warning("Cascade exhausted, returning last response from %s", current_model)
+                    return response, cascade_attempts, judge_reason
+                request.model = next_model
+                cascade_attempts += 1
+                continue
+
+        # ── LLM-as-Judge (opt-in) ──
+        if verifier in ("llm_judge", "rule_then_llm") and cascade.has_judge:
+            # Extract prompt and response text for the judge
+            last_msg = request.messages[-1].content if request.messages else ""
+            prompt_for_judge = last_msg if isinstance(last_msg, str) else str(last_msg)
+            resp_content = cascade._extract_content(response)
+            judge_result = await cascade.judge_async(prompt_for_judge, resp_content)
+            if not judge_result.passed:
+                judge_reason = judge_result.reason
+                logger.info(
+                    "Judge FAIL [%s]: %s → escalating (attempt %d/%d)",
+                    judge_reason, current_model, attempt + 1, max_attempts,
+                )
+                next_model = cascade.get_next_model(current_model)
+                if not next_model or attempt >= max_attempts - 1:
+                    logger.warning("Cascade exhausted, returning last response from %s", current_model)
+                    return response, cascade_attempts, judge_reason
+                request.model = next_model
+                cascade_attempts += 1
+                continue
+
+        # All checks passed
         if not cascade.config.enabled:
-            return response, cascade_attempts
-
-        validation = cascade.validate(response, request)
-        if validation.passed:
-            return response, cascade_attempts
-
-        logger.info(
-            "Cascade fail [%s]: %s → escalating (attempt %d/%d)",
-            validation.reason, current_model, attempt + 1, max_attempts,
-        )
-
-        next_model = cascade.get_next_model(current_model)
-        if not next_model or attempt >= max_attempts - 1:
-            logger.warning("Cascade exhausted, returning last response from %s", current_model)
-            return response, cascade_attempts
-
-        request.model = next_model
-        cascade_attempts += 1
+            return response, cascade_attempts, judge_reason
+        return response, cascade_attempts, judge_reason
 
     raise HTTPException(status_code=502, detail="All cascade attempts failed")
 
