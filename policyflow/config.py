@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import yaml
@@ -17,6 +18,15 @@ upstream:
   timeout: 60
 """
 
+_ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
+
+
+def _resolve_env(value: str) -> str:
+    """Replace ${VAR_NAME} placeholders with environment variable values."""
+    def _replace(match):
+        return os.getenv(match.group(1), "")
+    return _ENV_VAR_RE.sub(_replace, value)
+
 
 class Config:
     """PolicyFlow configuration, loaded from policyflow.yaml + env vars."""
@@ -24,6 +34,7 @@ class Config:
     def __init__(self, path: str = "policyflow.yaml") -> None:
         self.path = Path(path)
         self.data: dict = self._load()
+        self._model_provider: dict[str, str] = self._build_model_provider_map()
 
     def _load(self) -> dict:
         if self.path.exists():
@@ -32,7 +43,7 @@ class Config:
         else:
             data = yaml.safe_load(DEFAULT_CONFIG) or {}
 
-        # Env vars override YAML values
+        # ── Default upstream (env var overrides) ─────────────────────
         data.setdefault("upstream", {})
         data["upstream"]["base_url"] = os.getenv(
             "UPSTREAM_BASE_URL", data["upstream"].get("base_url", "http://localhost:3000")
@@ -43,7 +54,50 @@ class Config:
         data["upstream"]["timeout"] = int(
             os.getenv("UPSTREAM_TIMEOUT", data["upstream"].get("timeout", 60))
         )
+
+        # ── Resolve env vars in provider api_keys ────────────────────
+        providers_data = data.get("providers", {})
+        if isinstance(providers_data, dict):
+            for cfg in providers_data.values():
+                if "api_key" in cfg:
+                    cfg["api_key"] = _resolve_env(cfg["api_key"])
+
         return data
+
+    def _build_model_provider_map(self) -> dict[str, str]:
+        """Build a reverse index: model_id → provider_name.
+
+        providers is a dict like:
+            { "one-api": { base_url: ..., models: [...] }, "deepseek": {...} }
+        """
+        model_map: dict[str, str] = {}
+        providers = self.data.get("providers", {})
+        if isinstance(providers, dict):
+            for name, cfg in providers.items():
+                for model in cfg.get("models", []):
+                    model_map[model] = name
+        return model_map
+
+    def get_model_provider(self, model_id: str) -> str | None:
+        """Return the provider name for a model, or None if using default upstream."""
+        return self._model_provider.get(model_id)
+
+    def get_provider_config(self, provider_name: str) -> dict:
+        """Return {base_url, api_key, timeout} for a provider."""
+        providers = self.data.get("providers", {})
+        if isinstance(providers, dict):
+            cfg = providers.get(provider_name, {})
+            return {
+                "base_url": cfg.get("base_url", self.upstream_base_url),
+                "api_key": cfg.get("api_key", self.upstream_api_key),
+                "timeout": cfg.get("timeout", self.upstream_timeout),
+            }
+        # Fallback to default upstream
+        return {
+            "base_url": self.upstream_base_url,
+            "api_key": self.upstream_api_key,
+            "timeout": self.upstream_timeout,
+        }
 
     @property
     def upstream_base_url(self) -> str:

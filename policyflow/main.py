@@ -1,6 +1,6 @@
 """PolicyFlow — FastAPI application entry point.
 
-Week 4: SQLite logging + Dashboard + cost analysis.
+Week 6: multi-provider routing + LLM-as-Judge cascade + CLI + AI optimizer.
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PolicyFlow",
-    description='策略路由中间件，给 one-api 装上「什么请求用什么模型」的大脑 — Week 4: dashboard + costs',
-    version="0.4.0",
+    description='策略路由中间件 — 多供应商路由 + 级联验证 + CLI 成本分析',
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -109,7 +109,8 @@ async def chat_completions(
     try:
         if request.stream:
             response = None  # Streaming: can't extract usage for logging
-            return _stream_response(proxy, request, route_policy_name, route_method, route_score)
+            provider_name = proxy.config.get_model_provider(request.model)
+            return _stream_response(proxy, request, provider_name, route_policy_name, route_method, route_score)
         else:
             response, cascade_attempts = await _forward_with_cascade(
                 proxy, cascade, request
@@ -195,7 +196,8 @@ async def _forward_with_cascade(
         current_model = request.model
 
         try:
-            response = await proxy.chat_completion(request)
+            provider_name = proxy.config.get_model_provider(request.model)
+            response = await proxy.chat_completion(request, provider_name=provider_name)
         except ProxyError as e:
             logger.warning("Upstream error (attempt %d): %s", attempt + 1, e)
             next_model = cascade.get_next_model(current_model)
@@ -233,13 +235,14 @@ async def _forward_with_cascade(
 def _stream_response(
     proxy: UpstreamProxy,
     request: ChatCompletionRequest,
+    provider_name: str | None,
     policy_name: str,
     method: str,
     score: float,
 ) -> StreamingResponse:
     """Return a streaming response with PolicyFlow headers."""
     return StreamingResponse(
-        proxy.chat_completion_stream(request),
+        proxy.chat_completion_stream(request, provider_name=provider_name),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

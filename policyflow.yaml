@@ -1,6 +1,21 @@
 # PolicyFlow configuration
-# Week 3: Cascade validator + smart modifiers (agent/reasoning/window/session/fallback)
 
+# ── Providers: model → base_url + api_key mapping ─────────────────────
+# Each provider is an OpenAI-compatible API endpoint.
+# When a policy routes to a model, PolicyFlow looks up which provider
+# owns that model and forwards the request to that provider's base_url.
+# Models not listed in any provider fall back to the default upstream.
+providers:
+  one-api:
+    base_url: http://localhost:3000
+    api_key: ""
+    models:
+      - "claude-haiku-4-5"
+      - "claude-sonnet-4-6"
+      - "claude-opus-4-8"
+      - "gpt-4o"
+
+# ── Default upstream (fallback for models not in providers) ────────────
 upstream:
   base_url: http://localhost:3000   # one-api address
   api_key: ""                        # one-api API key (or set UPSTREAM_API_KEY env)
