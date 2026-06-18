@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "policyflow"
+version = "0.5.0"
+description = "策略路由中间件 — 给 one-api 装上「什么请求用什么模型」的大脑"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    "pyyaml>=6.0",
+    "pydantic>=2.10",
+    "python-dotenv>=1.0",
+    "numpy>=2.2",
+]
+
+[project.scripts]
+policyflow = "policyflow.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["policyflow*"]

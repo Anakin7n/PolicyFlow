@@ -16,7 +16,6 @@ from . import db
 from .cascade import CascadeConfig, CascadeValidator
 from .config import Config
 from .cost import calc_compared_cost, calc_cost
-from .dashboard import router as dashboard_router
 from .models import ChatCompletionRequest, ChatCompletionResponse, ModelsResponse
 from .modifiers import ModifierEngine
 from .proxy import ProxyError, UpstreamProxy
@@ -44,7 +43,7 @@ async def lifespan(app: FastAPI):
     app.state.cascade = cascade
     app.state.modifiers = modifiers
 
-    logger.info("PolicyFlow v0.4.0 started — Dashboard at /dashboard")
+    logger.info("PolicyFlow v0.5.0 started")
 
     try:
         yield
@@ -60,7 +59,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(dashboard_router)
 
 
 # ── OpenAI-compatible endpoints ──────────────────────────────────────
