@@ -80,6 +80,12 @@ cascade:
 logging:
   log_prompt_preview: false   # Store first 500 chars of prompt (opt-in)
 
+# ── AI Optimization engine ────────────────────────────────────────────
+optimizer:
+  enabled: true
+  model: deepseek-v4-flash
+  max_suggestions: 5
+
 # ── Smart modifiers ──────────────────────────────────────────────────
 modifiers:
   agent_detection: true        # Agent请求 → 强制最强模型
