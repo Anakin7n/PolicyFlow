@@ -1,11 +1,11 @@
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "policyflow"
 version = "0.5.0"
-description = "策略路由中间件 — 给 one-api 装上「什么请求用什么模型」的大脑"
+description = "OpenAI 兼容策略路由代理 — 多供应商直连，什么请求用什么模型"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
@@ -16,6 +16,8 @@ dependencies = [
     "pydantic>=2.10",
     "python-dotenv>=1.0",
     "numpy>=2.2",
+    "rich>=13.0",
+    "pyfiglet>=1.0",
 ]
 
 [project.scripts]

@@ -1,7 +1,7 @@
-"""Upstream proxy — forwards requests to one-api or any OpenAI-compatible backend.
+"""Upstream proxy — forwards requests to vendor APIs directly.
 
-Supports multi-provider routing: each provider has its own httpx client
-with its own base_url and api_key.
+Supports multi-provider routing: each provider (DeepSeek, Anthropic, OpenAI, etc.)
+has its own httpx client with its own base_url and api_key.
 """
 
 from __future__ import annotations
@@ -77,6 +77,8 @@ class UpstreamProxy:
             raise ProxyError(f"Cannot connect to upstream {label}")
         except httpx.TimeoutException:
             raise ProxyError(f"Upstream request timed out: {label}")
+        except httpx.StreamError as e:
+            raise ProxyError(f"Stream error from upstream {label}: {e}")
         if response.status_code != 200:
             raise ProxyError(
                 f"Upstream returned {response.status_code}: {response.text[:500]}"
@@ -117,6 +119,8 @@ class UpstreamProxy:
             raise ProxyError(f"Cannot connect to upstream {label}")
         except httpx.TimeoutException:
             raise ProxyError(f"Upstream request timed out: {label}")
+        except httpx.StreamError as e:
+            raise ProxyError(f"Stream error from upstream {label}: {e}")
 
     async def list_models(self) -> dict:
         """Proxy the /v1/models endpoint (uses default upstream)."""

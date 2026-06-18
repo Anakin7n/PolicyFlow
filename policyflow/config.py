@@ -13,7 +13,7 @@ load_dotenv()
 
 DEFAULT_CONFIG = """
 upstream:
-  base_url: http://localhost:3000
+  base_url: https://api.deepseek.com
   api_key: ""
   timeout: 60
 """
@@ -43,6 +43,12 @@ class Config:
         else:
             data = yaml.safe_load(DEFAULT_CONFIG) or {}
 
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"policyflow.yaml must be a mapping, got {type(data).__name__}. "
+                "Check for top-level YAML sequence or scalar."
+            )
+
         # ── Default upstream (env var overrides) ─────────────────────
         data.setdefault("upstream", {})
         data["upstream"]["base_url"] = os.getenv(
@@ -68,7 +74,7 @@ class Config:
         """Build a reverse index: model_id → provider_name.
 
         providers is a dict like:
-            { "one-api": { base_url: ..., models: [...] }, "deepseek": {...} }
+            { "deepseek": { base_url: ..., models: [...] }, "anthropic": {...} }
         """
         model_map: dict[str, str] = {}
         providers = self.data.get("providers", {})

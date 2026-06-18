@@ -5,18 +5,30 @@
 
 # ── Providers ────────────────────────────────────────────────────────
 providers:
-  one-api:
-    base_url: http://localhost:3000
-    api_key: ""
+  deepseek:
+    base_url: https://api.deepseek.com
+    api_key: "${DEEPSEEK_API_KEY}"
     models:
-      - "qwen-max"
       - "deepseek-v4-flash"
       - "deepseek-v4-pro"
+
+  anthropic:
+    base_url: https://api.anthropic.com
+    api_key: "${ANTHROPIC_API_KEY}"
+    models:
       - "claude-sonnet-4-6"
+      - "claude-opus-4-8"
+
+  qwen:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: "${DASHSCOPE_API_KEY}"
+    models:
+      - "qwen-max"
+      - "qwen3.5-flash"
 
 upstream:
-  base_url: http://localhost:3000
-  api_key: ""
+  base_url: https://api.deepseek.com
+  api_key: "${DEEPSEEK_API_KEY}"
   timeout: 60
 
 embedding:
