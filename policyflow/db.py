@@ -239,7 +239,7 @@ def query_recent_requests(limit: int = 50) -> list[dict]:
         """SELECT timestamp, user, original_model, routed_model,
                   policy_name, method, prompt_tokens, completion_tokens,
                   estimated_cost, cascade_attempts, success
-           FROM requests ORDER BY id DESC LIMIT ?""",
+           FROM requests ORDER BY timestamp DESC LIMIT ?""",
         (limit,),
     ).fetchall()
     conn.close()

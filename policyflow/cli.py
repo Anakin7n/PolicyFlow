@@ -88,10 +88,8 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--reload", action="store_true", default=False)
 
-    p = subparsers.add_parser("report", help="查看成本分析报告")
-    p.add_argument("--since", default="30d", help="统计周期 (7d/30d/1m)")
-    p.add_argument("--by-model", action="store_true", help="按模型拆分")
-    p.add_argument("--by-day", action="store_true", help="按日期拆分")
+    p = subparsers.add_parser("report", help="TUI dashboard (stats + charts + optimizer)")
+    p.add_argument("--since", default="30d", help="统计周期 (7d/30d)")
 
     p = subparsers.add_parser("classify", help="测试策略路由")
     p.add_argument("prompt", help="要测试的 prompt 文本")
@@ -145,13 +143,7 @@ def cmd_serve(args) -> None:
 def cmd_report(args) -> None:
     from . import db
     from .dashboard_tui import run_dashboard
-
     days = parse_duration(args.since)
-    if args.by_day:
-        _daily_view(days)
-        return
-
-    # Launch full-screen TUI dashboard
     run_dashboard(db, days)
 
 
@@ -171,12 +163,12 @@ def _daily_view(days: int) -> None:
         day = d["day"][5:]
         aw = max(1, int(d["actual_cost"] / max_v * bar_w))
         cw = max(1, int(d["compared_cost"] / max_v * bar_w))
-        console.print(f"  [dim]{day}[/dim]  [green]{'#'*aw}[/green] ${d['actual_cost']:.2f}")
-        console.print(f"       [red]{'#'*cw}[/red] ${d['compared_cost']:.2f}\n")
+        console.print(f"  [dim]{day}[/dim]  [green]{'#'*aw}[/green] ¥{d['actual_cost']:.2f}")
+        console.print(f"       [red]{'#'*cw}[/red] ¥{d['compared_cost']:.2f}\n")
 
     total_actual = sum(d["actual_cost"] for d in daily)
     total_compared = sum(d["compared_cost"] for d in daily)
-    console.print(f"  [bold]合计  实际 ${total_actual:.2f}  |  对比 ${total_compared:.2f}  |  节省 ${total_compared - total_actual:.2f}[/bold]")
+    console.print(f"  [bold]合计  实际 ¥{total_actual:.2f}  |  对比 ¥{total_compared:.2f}  |  节省 ¥{total_compared - total_actual:.2f}[/bold]")
     console.print()
 
 
@@ -285,14 +277,14 @@ def cmd_optimize(args) -> None:
             body.append(f"{s.title}\n\n", style="bold white")
             body.append(f"类型: {s.kind}  |  风险: ", style="dim")
             body.append(f"{s.risk}  |  ", style=risk_style)
-            body.append(f"预计每月节省: ${s.estimated_savings_monthly:.2f}\n\n", style="dim")
+            body.append(f"预计每月节省: ¥{s.estimated_savings_monthly:.2f}\n\n", style="dim")
             body.append(f"{s.description}\n\n")
             if s.yaml_snippet:
                 body.append(s.yaml_snippet, style="cyan")
                 body.append("\n")
             console.print(Panel(body, border_style=risk_style, title=f"建议 {i}"))
 
-        console.print(f"\n  [bold]>> 汇总: 预计每月节省 ${result.total_estimated_savings:.2f}[/bold]")
+        console.print(f"\n  [bold]>> 汇总: 预计每月节省 ¥{result.total_estimated_savings:.2f}[/bold]")
         console.print(f"  [dim](dry-run 模式，未修改文件)[/dim]\n")
 
     asyncio.run(_run())

@@ -25,7 +25,7 @@ Analyze the usage data below and suggest concrete improvements to the YAML polic
 
 ## Period Statistics
 Total requests: {total_requests}
-Total cost: ${total_cost:.2f}
+Total cost: ¥{total_cost:.2f}
 
 ## Per-Policy Stats
 {policy_stats_table}
@@ -115,7 +115,7 @@ async def generate_optimizations(
     stats_lines = []
     for ps in policy_stats:
         stats_lines.append(
-            f"  {ps['name']}: {ps['hits']} requests, ${ps['total_cost']:.2f}, "
+            f"  {ps['name']}: {ps['hits']} requests, ¥{ps['total_cost']:.2f}, "
             f"avg similarity {ps['avg_similarity']}, cascade {ps['cascade_pct']}%"
         )
     policy_table = "\n".join(stats_lines) if stats_lines else "  (no data)"
