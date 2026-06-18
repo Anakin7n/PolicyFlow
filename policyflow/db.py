@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 from pathlib import Path
@@ -33,6 +34,35 @@ CREATE INDEX IF NOT EXISTS idx_requests_user ON requests(user);
 CREATE INDEX IF NOT EXISTS idx_requests_policy ON requests(policy_name);
 """
 
+# Columns added after initial release (migrated in _migrate_schema)
+MIGRATIONS = [
+    "ALTER TABLE requests ADD COLUMN prompt_hash TEXT DEFAULT ''",
+    "ALTER TABLE requests ADD COLUMN prompt_preview TEXT DEFAULT ''",
+    "ALTER TABLE requests ADD COLUMN judge_reason TEXT DEFAULT ''",
+]
+
+
+def _migrate_schema() -> None:
+    """Apply schema migrations. Each migration is attempted once;
+    if the column already exists, the error is ignored."""
+    conn = sqlite3.connect(str(DB_PATH))
+    for sql in MIGRATIONS:
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+    conn.commit()
+    conn.close()
+
+
+def hash_prompt(text: str) -> str:
+    """Return a truncated SHA-256 hash of the prompt text.
+
+    Used for clustering similar requests in the optimizer without
+    storing the full prompt text.
+    """
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
 
 def get_db() -> sqlite3.Connection:
     """Get a database connection (not thread-safe — fine for single-worker uvicorn)."""
@@ -43,11 +73,12 @@ def get_db() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create tables and indexes if they don't exist."""
+    """Create tables, indexes, and apply migrations."""
     conn = get_db()
     conn.executescript(SCHEMA)
     conn.commit()
     conn.close()
+    _migrate_schema()
 
 
 def log_request(
@@ -64,6 +95,9 @@ def log_request(
     cascade_attempts: int,
     duration_ms: int,
     success: bool,
+    prompt_hash: str = "",
+    prompt_preview: str = "",
+    judge_reason: str = "",
 ) -> None:
     """Insert a request log entry."""
     conn = get_db()
@@ -72,8 +106,9 @@ def log_request(
            (timestamp, user, original_model, routed_model, policy_name,
             method, similarity_score, prompt_tokens, completion_tokens,
             total_tokens, estimated_cost, compared_cost,
-            cascade_attempts, duration_ms, success)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            cascade_attempts, duration_ms, success,
+            prompt_hash, prompt_preview, judge_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             time.strftime("%Y-%m-%d %H:%M:%S"),
             user,
@@ -90,6 +125,9 @@ def log_request(
             cascade_attempts,
             duration_ms,
             1 if success else 0,
+            prompt_hash,
+            prompt_preview,
+            judge_reason,
         ),
     )
     conn.commit()
@@ -202,6 +240,83 @@ def query_recent_requests(limit: int = 50) -> list[dict]:
                   policy_name, method, estimated_cost, cascade_attempts, success
            FROM requests ORDER BY id DESC LIMIT ?""",
         (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Query helpers for AI optimizer ───────────────────────────────
+
+def query_policy_stats(days: int = 30) -> list[dict]:
+    """Per-policy statistics for the AI optimizer."""
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT
+             COALESCE(policy_name, 'none') as name,
+             COUNT(*) as hits,
+             COALESCE(SUM(estimated_cost), 0) as total_cost,
+             ROUND(AVG(similarity_score), 3) as avg_similarity,
+             SUM(CASE WHEN cascade_attempts > 0 THEN 1 ELSE 0 END) as cascade_count,
+             ROUND(CAST(SUM(CASE WHEN cascade_attempts > 0 THEN 1 ELSE 0 END) AS REAL)
+                   / MAX(COUNT(*), 1) * 100, 1) as cascade_pct
+           FROM requests
+           WHERE timestamp >= date('now', ? || ' days')
+           GROUP BY policy_name ORDER BY hits DESC""",
+        (f"-{days}",),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def query_unmatched_prompts(days: int = 30, limit: int = 20) -> list[dict]:
+    """Get prompt hashes and previews for requests that hit the default policy.
+
+    These are candidates for new policies in the optimizer.
+    """
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT prompt_hash, prompt_preview, COUNT(*) as cnt
+           FROM requests
+           WHERE timestamp >= date('now', ? || ' days')
+             AND (policy_name = 'default' OR policy_name = 'none'
+                  OR policy_name IS NULL)
+             AND prompt_hash != ''
+           GROUP BY prompt_hash ORDER BY cnt DESC LIMIT ?""",
+        (f"-{days}", limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def query_cascade_anomalies(days: int = 30, limit: int = 30) -> list[dict]:
+    """Get failed cascade attempts with judge reasons for the optimizer."""
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT policy_name, routed_model, judge_reason,
+                  prompt_preview, cascade_attempts
+           FROM requests
+           WHERE timestamp >= date('now', ? || ' days')
+             AND cascade_attempts > 0
+             AND judge_reason != ''
+           ORDER BY id DESC LIMIT ?""",
+        (f"-{days}", limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def query_export(days: int = 30) -> list[dict]:
+    """Export all log entries for the given period."""
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT timestamp, user, original_model, routed_model, policy_name,
+                  method, similarity_score, prompt_tokens, completion_tokens,
+                  estimated_cost, compared_cost, cascade_attempts,
+                  duration_ms, success, judge_reason
+           FROM requests
+           WHERE timestamp >= date('now', ? || ' days')
+           ORDER BY id DESC""",
+        (f"-{days}",),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]

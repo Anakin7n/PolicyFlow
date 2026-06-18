@@ -73,6 +73,11 @@ cascade:
     - "claude-opus-4-8"
 
 # Smart modifiers — rule-based checks that override routing
+# ── Logging (privacy-aware) ──────────────────────────────────────────
+logging:
+  log_prompt_preview: false   # Store first 500 chars of prompt (opt-in)
+
+# ── Smart modifiers ──────────────────────────────────────────────────
 modifiers:
   agent_detection: true        # Agent请求 → 强制最强模型
   reasoning_detection: true    # 推理任务 → reasoning模型
