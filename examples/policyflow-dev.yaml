@@ -3,6 +3,16 @@
 # 适用场景: 个人/团队开发，大量代码生成和 debug
 # 核心思路: 代码走代码模型，其他走便宜模型
 
+# ── Providers ────────────────────────────────────────────────────────
+providers:
+  one-api:
+    base_url: http://localhost:3000
+    api_key: ""
+    models:
+      - "deepseek-v4-flash"
+      - "deepseek-v4-pro"
+      - "claude-sonnet-4-6"
+
 upstream:
   base_url: http://localhost:3000
   api_key: ""

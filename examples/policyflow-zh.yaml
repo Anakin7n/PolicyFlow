@@ -3,6 +3,17 @@
 # 适用场景: 团队日常办公，大量翻译/摘要/格式化需求
 # 核心思路: 简单任务走国产便宜模型，复杂任务走高端模型
 
+# ── Providers ────────────────────────────────────────────────────────
+providers:
+  one-api:
+    base_url: http://localhost:3000
+    api_key: ""
+    models:
+      - "qwen-max"
+      - "deepseek-v4-flash"
+      - "deepseek-v4-pro"
+      - "claude-sonnet-4-6"
+
 upstream:
   base_url: http://localhost:3000
   api_key: ""

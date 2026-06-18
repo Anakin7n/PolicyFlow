@@ -4,7 +4,18 @@
 
 ## 项目简介
 
-PolicyFlow 是一个面向 LLM API 的策略路由中间件。它部署在 one-api（或任何 OpenAI 兼容网关）前面，对进入的请求做意图分类，改写 model 字段，使简单任务走便宜模型、复杂任务走高端模型。技术栈：FastAPI + SQLite + Chart.js。
+PolicyFlow 是一个独立的 OpenAI 兼容策略路由代理，不依赖任何第三方中间层。对进入的请求做意图分类，改写 model 字段并切换目标 API 端点，使简单任务走便宜模型、复杂任务走高端模型。技术栈：FastAPI + SQLite + CLI (argparse)。
+
+核心模块 (~2300 行)：
+- **main.py** — FastAPI 入口，完整的 modifiers → router → cascade → log 管道
+- **config.py** — YAML 配置加载，多供应商解析，环境变量替代
+- **proxy.py** — 多 provider httpx 客户端池，按模型懒加载
+- **router.py** — 四阶段路由决策（image → keyword → embedding → default）
+- **cascade.py** — 规则验证器 + LLM-as-Judge（可选），借鉴 NadirClaw
+- **modifiers.py** — Agent/推理/窗口/会话 四个预路由修饰器
+- **optimizer.py** — AI 优化引擎，分析日志生成策略改进建议
+- **cli.py** — 5 个 CLI 命令（serve/report/classify/export/optimize）
+- **db.py** — SQLite 日志，schema 迁移，成本查询
 
 ## 编码准则
 
@@ -68,7 +79,9 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 项目约定
 
-- **单包结构** — 所有模块在 `policyflow/` 下，不拆子包。项目 ~2000 行，拆包属于过度设计。
-- **外部依赖降级** — 每个外部依赖（Embedding API、上游、SQLite）都有降级路径。即使 Embedding API 挂了，关键词匹配仍能正常工作。
-- **配置优于代码** — 所有路由行为通过 YAML 控制，用户不需要改 Python 代码就能调整路由规则。
-- **响应头追踪** — 每个请求返回 `X-PolicyFlow-*` 响应头，包含路由决策信息，不需要翻日志就能知道"为什么走了这个模型"。
+- **单包结构** — 所有模块在 `policyflow/` 下，不拆子包。
+- **外部依赖降级** — 每个外部依赖都有降级路径：Embedding API 挂了用关键词匹配；Judge 调用失败视为 PASS；Optimizer 调用失败返回空建议。
+- **配置优于代码** — 所有路由行为通过 YAML 控制（策略、级联、修饰器、optimizer），用户不需要改 Python 代码。
+- **响应头追踪** — 每个请求返回 `X-PolicyFlow-*` 响应头，包含路由决策信息。
+- **多供应商透明** — providers 段配置模型→API 端点映射，上游无感知。
+- **向后兼容** — upstream 段始终作为默认 fallback，旧 YAML 不加 providers 也能正常工作。

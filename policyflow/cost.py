@@ -82,9 +82,12 @@ def calc_cost(model_id: str, prompt_tokens: int, completion_tokens: int) -> floa
 
 
 def calc_compared_cost(
-    prompt_tokens: int, completion_tokens: int, compared_model: str = "claude-opus-4-8"
+    prompt_tokens: int, completion_tokens: int, compared_model: str = "deepseek-v4-pro"
 ) -> float:
-    """Calculate what the cost would have been if routed to the comparison model."""
+    """Calculate what the cost would have been if routed to the comparison model.
+
+    Default baseline: deepseek-v4-pro — a popular domestic model with moderate pricing.
+    """
     return calc_cost(compared_model, prompt_tokens, completion_tokens)
 
 
