@@ -11,7 +11,6 @@ import time
 from typing import Any
 
 from .models import ChatCompletionRequest
-from .policy import Policy
 
 logger = logging.getLogger(__name__)
 

@@ -7,10 +7,7 @@ and generate concrete, actionable suggestions for policyflow.yaml changes.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
-
-import yaml
 
 from . import db
 from .config import Config
@@ -145,7 +142,8 @@ async def generate_optimizations(
     try:
         with open(config.path, encoding="utf-8") as f:
             current_yaml = f.read()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not read policyflow.yaml: %s — optimizer will run without config context", exc)
         current_yaml = "# (could not read policyflow.yaml)"
 
     # ── Construct prompt ─────────────────────────────────────

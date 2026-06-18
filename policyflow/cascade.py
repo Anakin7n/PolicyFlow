@@ -45,7 +45,6 @@ class CascadeConfig:
     verifier: str = "rule_only"      # rule_only | llm_judge | rule_then_llm
     judge_model: str = ""            # Model to use for LLM-as-Judge
     judge_prompt_template: str = ""  # Custom judge prompt (empty = use default)
-    acceptance_threshold: float = 0.80
     max_retries: int = 2
     escalation_chain: list[str] = field(default_factory=list)
 
@@ -186,7 +185,9 @@ class CascadeValidator:
 
     @staticmethod
     def _extract_content(response: ChatCompletionResponse) -> str:
-        """Extract text content from the first choice."""
+        """Extract text content from the first choice. Safe on empty choices."""
+        if not response.choices:
+            return ""
         choice = response.choices[0]
         if choice.message and choice.message.content:
             content = choice.message.content

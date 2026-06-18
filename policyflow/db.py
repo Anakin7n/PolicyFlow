@@ -237,7 +237,8 @@ def query_recent_requests(limit: int = 50) -> list[dict]:
     conn = get_db()
     rows = conn.execute(
         """SELECT timestamp, user, original_model, routed_model,
-                  policy_name, method, estimated_cost, cascade_attempts, success
+                  policy_name, method, prompt_tokens, completion_tokens,
+                  estimated_cost, cascade_attempts, success
            FROM requests ORDER BY id DESC LIMIT ?""",
         (limit,),
     ).fetchall()
@@ -312,7 +313,7 @@ def query_export(days: int = 30) -> list[dict]:
         """SELECT timestamp, user, original_model, routed_model, policy_name,
                   method, similarity_score, prompt_tokens, completion_tokens,
                   estimated_cost, compared_cost, cascade_attempts,
-                  duration_ms, success, judge_reason
+                  duration_ms, success, judge_reason, prompt_hash, prompt_preview
            FROM requests
            WHERE timestamp >= date('now', ? || ' days')
            ORDER BY id DESC""",

@@ -10,7 +10,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import db
 from .db import hash_prompt
@@ -86,7 +86,7 @@ app = FastAPI(
 
 # ── OpenAI-compatible endpoints ──────────────────────────────────────
 
-@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
     fastapi_request: FastAPIRequest,
@@ -102,13 +102,19 @@ async def chat_completions(
     original_model = request.model
 
     # Hash the last user message for logging
-    last_msg = request.messages[-1].content if request.messages else ""
-    prompt_text = last_msg if isinstance(last_msg, str) else str(last_msg)
+    last_msg = request.messages[-1].content if request.messages else None
+    if last_msg is None:
+        prompt_text = ""
+    elif isinstance(last_msg, str):
+        prompt_text = last_msg
+    else:
+        prompt_text = str(last_msg)
     prompt_hash_val = hash_prompt(prompt_text) if prompt_text else ""
     prompt_preview_val = prompt_text[:500] if config.log_prompt_preview else ""
     judge_reason_val = ""
     session_id = fastapi_request.headers.get("X-Session-ID")
     user = fastapi_request.headers.get("X-User", "default")
+    response = None  # Pre-bind for finally block safety
     cascade_attempts = 0
     success = True
 
@@ -140,6 +146,8 @@ async def chat_completions(
     try:
         if request.stream:
             response = None  # Streaming: can't extract usage for logging
+            if cascade.config.enabled and cascade.config.verifier != "rule_only":
+                logger.warning("Cascade validation is not supported for streaming requests")
             provider_name = proxy.config.get_model_provider(request.model)
             return _stream_response(proxy, request, provider_name, route_policy_name, route_method, route_score)
         else:
@@ -147,6 +155,9 @@ async def chat_completions(
                 proxy, cascade, request
             )
     except HTTPException:
+        success = False
+        raise
+    except Exception:
         success = False
         raise
     finally:
@@ -168,7 +179,15 @@ async def chat_completions(
             judge_reason=judge_reason_val,
         )
 
-    return response
+    # Return non-streaming response with PolicyFlow routing headers
+    return JSONResponse(
+        content=response.model_dump(exclude_none=True),
+        headers={
+            "X-PolicyFlow-Policy": route_policy_name,
+            "X-PolicyFlow-Method": route_method,
+            "X-PolicyFlow-Score": f"{route_score:.3f}",
+        },
+    )
 
 
 def _log_to_db(
@@ -234,6 +253,15 @@ async def _forward_with_cascade(
     judge_reason = ""
     verifier = cascade.config.verifier
 
+    # If cascade is completely disabled, just forward once and return
+    if not cascade.config.enabled:
+        try:
+            provider_name = proxy.config.get_model_provider(request.model)
+            response = await proxy.chat_completion(request, provider_name=provider_name)
+        except ProxyError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return response, 0, ""
+
     for attempt in range(max_attempts):
         current_model = request.model
 
@@ -269,8 +297,15 @@ async def _forward_with_cascade(
         # ── LLM-as-Judge (opt-in) ──
         if verifier in ("llm_judge", "rule_then_llm") and cascade.has_judge:
             # Extract prompt and response text for the judge
-            last_msg = request.messages[-1].content if request.messages else ""
-            prompt_for_judge = last_msg if isinstance(last_msg, str) else str(last_msg)
+            last_msg = request.messages[-1].content if request.messages else None
+            if last_msg is None:
+                prompt_for_judge = ""
+            elif isinstance(last_msg, str):
+                prompt_for_judge = last_msg
+            else:
+                prompt_for_judge = str(last_msg)
+            if not response.choices:
+                return response, cascade_attempts, "judge_no_choices"
             resp_content = cascade._extract_content(response)
             judge_result = await cascade.judge_async(prompt_for_judge, resp_content)
             if not judge_result.passed:
@@ -288,8 +323,6 @@ async def _forward_with_cascade(
                 continue
 
         # All checks passed
-        if not cascade.config.enabled:
-            return response, cascade_attempts, judge_reason
         return response, cascade_attempts, judge_reason
 
     raise HTTPException(status_code=502, detail="All cascade attempts failed")

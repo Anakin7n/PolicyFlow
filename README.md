@@ -68,8 +68,8 @@ providers:
 
 # 默认上游（未列在 providers 中的模型走这里）
 upstream:
-  base_url: http://localhost:3000
-  api_key: "sk-xxx"
+  base_url: https://api.deepseek.com
+  api_key: "${DEEPSEEK_API_KEY}"
 ```
 
 支持的 api_key 格式：直接写字符串或 `${ENV_VAR}` 引用环境变量。
@@ -111,7 +111,7 @@ response = client.chat.completions.create(
 
 ```bash
 cp .env.example .env
-# 编辑 .env，设置 UPSTREAM_BASE_URL 和 UPSTREAM_API_KEY
+# 编辑 .env，填入各供应商的 API Key
 docker compose up -d
 ```
 
