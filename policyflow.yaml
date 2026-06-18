@@ -89,7 +89,14 @@ embedding:
   similarity_threshold: 0.75
   timeout: 30
 
-# Routing policies — first match wins, then default
+# Routing policies — first match wins, then default.
+# Two modes:
+#   route_to: "model-name"           → explicit routing (current, simple)
+#   specialty: 任务类型               → capability-aware auto-select (智能选模)
+#     Supported specialties: 代码生成 代码审查 数学推理 逻辑分析 文本创作
+#                            翻译校对 图片理解 Agent工具调用 通用问答
+#                            系统设计 安全审计 性能优化
+#     Optional: max_cost_tier: cheap|mid|expensive for budget control
 policies:
   - name: "翻译、摘要、格式化"
     match:

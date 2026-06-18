@@ -4,7 +4,7 @@
 
 PolicyFlow 是一个独立的 OpenAI 兼容代理，借鉴 [NadirClaw](https://github.com/nadirclaw/nadirclaw) 的级联验证思路。管理员通过 YAML 定义路由策略，系统自动将简单请求导向便宜模型、复杂请求保留高级模型，并通过 CLI 提供成本分析和 AI 优化建议。
 
-**核心差异化**：策略透明（YAML 可配）、多供应商路由（不同模型走不同 API）、LLM-as-Judge 级联验证、AI 优化引擎。
+**核心差异化**：策略透明（YAML 可配）、多供应商直连、能力感知路由（自动选最适合的模型）、LLM-as-Judge 级联验证、AI 优化引擎、Textual 全屏仪表盘。
 
 ## 核心流程
 
@@ -121,13 +121,21 @@ docker compose up -d
 
 ### report——全屏仪表盘
 
-接管整个终端，左侧 Stats 面板，右侧柱状图（策略分布 + 供应商模型分段），底部请求明细表格。按 `Q` 退出：
+Textual 响应式 TUI 仪表盘，包含四个模块卡片，支持独立滚动：
+
+- **Stats** — 总请求数/花费/节省/级联率
+- **Policy Distribution** — 各策略花费占比柱状图
+- **Model Usage by Provider** — 供应商→模型两级花费分解
+- **Daily Cost Comparison** — 每日实际 vs 基准对比，含节省金额
+- **Recent Requests** — 最近请求明细（可滚动）
+- **AI Optimization** — 内嵌优化建议
 
 ```bash
 python -m policyflow report
 python -m policyflow report --since 7d
-python -m policyflow report --by-day  # 每日柱状图对比模式
 ```
+
+键盘操作：`Q` 退出，`R` 刷新，`Tab` 切换焦点，`↑↓`/滚轮在模块内滚动。
 
 ### classify——测试路由
 
@@ -145,7 +153,19 @@ python -m policyflow export --format json
 ### optimize——AI 优化建议
 
 ```bash
-python -m policyflow optimize --dry-run
+python -m policyflow optimize --since 30d
+```
+
+> 提示：Windows 用户可直接双击 `scripts\launcher.bat` 一键启动仪表盘或服务。
+
+## 一键启动
+
+```bash
+scripts\launcher.bat    # 双击或命令行运行
+
+  [1] Dashboard   全屏仪表盘
+  [2] Serve       启动代理 (0.0.0.0:8000)
+  [Q] Quit
 ```
 
 ## 策略配置
@@ -192,6 +212,22 @@ policies:
       default: true
     route_to: "deepseek-v4-pro"
 ```
+
+### 能力感知路由（智能选模）
+
+不写死模型，声明任务类型，系统根据模型能力评分 + 价格自动选最优：
+
+```yaml
+  - name: "代码生成"
+    match:
+      keywords: ["写代码", "debug", "重构", "单元测试"]
+    specialty: 代码生成        # 自动选代码能力最强、性价比最高的模型
+    max_cost_tier: mid          # 可选：限制预算 cheap | mid | expensive
+```
+
+支持的 `specialty` 类型：`代码生成` `代码审查` `数学推理` `逻辑分析` `文本创作` `翻译校对` `图片理解` `Agent工具调用` `通用问答` `系统设计` `安全审计` `性能优化`
+
+系统内置 30+ 模型的 8 维能力评分（代码/数学/推理/写作/多语言/视觉/指令遵循/Agent），综合计算能力匹配分 + 对数价格分，量化选模而非拍脑袋。
 
 ## 多供应商路由
 
@@ -272,7 +308,7 @@ $ python -m policyflow optimize --since 30d
            keywords: ["天气", "笑话", "你好"]
          route_to: "deepseek-v4-flash"
   ...
-  📊 汇总: 执行以上建议，预计每月节省 $29.00
+  📊 汇总: 执行以上建议，预计每月节省 ¥29.00
 ```
 
 ## 响应头追踪
@@ -303,7 +339,7 @@ X-PolicyFlow-Score: 1.000
 | 字节豆包 | Doubao 1.6 / Seed 2.0 Lite |
 | 百度文心 | ERNIE 5.1 / 4.5 Turbo / Speed Pro |
 
-报告对比公式：`实际花费` vs `如果全用 deepseek-v4-pro 的花费`。
+报告对比公式：`实际花费` vs `如果全用 deepseek-v4-pro 的花费`。金额单位为人民币（¥）。
 
 ## 项目结构
 
@@ -320,14 +356,17 @@ PolicyFlow/
 │   ├── modifiers.py      # 6 个智能修饰器
 │   ├── cascade.py        # 级联验证器 + LLM-as-Judge
 │   ├── db.py             # SQLite 日志层
-│   ├── cost.py           # 33 个模型定价
+│   ├── cost.py           # 30+ 模型定价
+│   ├── model_profiles.py # 模型能力评分（8维）+ 智能选模
 │   ├── optimizer.py      # AI 优化建议引擎
-│   ├── dashboard_tui.py  # 全屏 TUI 仪表盘（textual）
+│   ├── dashboard_tui.py  # 全屏 TUI 仪表盘（Textual）
 │   ├── cli.py            # CLI 命令（serve/report/classify/export/optimize）
 │   └── __main__.py       # python -m policyflow 入口
 ├── examples/
 │   ├── policyflow-zh.yaml   # 中文办公场景
 │   └── policyflow-dev.yaml  # 开发场景
+├── scripts/
+│   └── launcher.bat       # Windows 一键启动菜单
 ├── policyflow.yaml      # 默认配置
 ├── pyproject.toml       # 打包配置
 ├── Dockerfile

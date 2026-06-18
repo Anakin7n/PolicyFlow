@@ -6,6 +6,7 @@ import logging
 
 from .classifier import EmbeddingClassifier
 from .config import Config
+from .model_profiles import select_best_model
 from .models import ChatCompletionRequest
 from .policy import Policy, PolicyEngine
 
@@ -92,7 +93,11 @@ class Router:
         2. Keyword exact match (cheap, no API call)
         3. Embedding similarity match (main classification path)
         4. Default policy — fallback
+
+        When a policy uses `specialty` (capability routing), the best model
+        is selected automatically based on capability scores + cost.
         """
+        available = list(self.config._model_provider.keys())
         prompt = _extract_prompt(request)
         token_estimate = _estimate_tokens(prompt)
         has_img = _has_image(request.messages)
@@ -100,7 +105,7 @@ class Router:
         # Phase 1: Image detection (explicit rule)
         for policy in self.engine.non_default_policies:
             if policy.has_image and has_img:
-                return RouteDecision(policy, "image_match", 1.0)
+                return RouteDecision(policy, "image_match", 1.0, available_models=available)
 
         # Phase 2: Keyword exact match (case-insensitive substring)
         for policy in self.engine.non_default_policies:
@@ -113,7 +118,7 @@ class Router:
             if policy.keywords:
                 prompt_lower = prompt.lower()
                 if any(kw.lower() in prompt_lower for kw in policy.keywords):
-                    return RouteDecision(policy, "keyword_match", 1.0)
+                    return RouteDecision(policy, "keyword_match", 1.0, available_models=available)
 
         # Phase 3: Embedding similarity match
         if prompt and self.classifier.policy_embeddings:
@@ -123,14 +128,14 @@ class Router:
                 if policy_name:
                     for p in self.engine.policies:
                         if p.name == policy_name:
-                            return RouteDecision(p, "embedding_match", score)
+                            return RouteDecision(p, "embedding_match", score, available_models=available)
             except Exception as exc:
                 logger.warning("Embedding classification failed, falling back to default: %s", exc)
 
         # Phase 4: Default
         default = self.engine.default
         if default:
-            return RouteDecision(default, "default", 0.0)
+            return RouteDecision(default, "default", 0.0, available_models=available)
 
         # Ultimate fallback: keep original model
         return RouteDecision(None, "passthrough", 0.0, original_model=request.model)
@@ -147,11 +152,21 @@ class RouteDecision:
         method: str,
         score: float,
         original_model: str = "",
+        available_models: list[str] | None = None,
     ) -> None:
         self.policy = policy
         self.method = method
         self.score = score
-        self.target_model = policy.route_to if policy else original_model
+        if policy and policy.uses_capability_routing and available_models:
+            best = select_best_model(
+                policy.specialty, available_models,
+                cost_tier=policy.max_cost_tier,
+            )
+            self.target_model = best or policy.route_to or original_model
+            if best:
+                self.method = f"capability({policy.specialty})"
+        else:
+            self.target_model = policy.route_to if policy else original_model
 
     def __repr__(self) -> str:
         return (

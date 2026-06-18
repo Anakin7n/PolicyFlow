@@ -321,7 +321,7 @@ class PolicyFlowDashboard(App):
 
     def compose(self) -> ComposeResult:
         from rich.text import Text as Rt
-        banner = Rt(pyfiglet.figlet_format("PolicyFlow", font="standard"), style="#aaccee")
+        banner = Rt(pyfiglet.figlet_format("PolicyFlow", font="big"), style="bold cyan")
         yield Static(banner, id="header")
 
         with VerticalScroll(id="page"):
