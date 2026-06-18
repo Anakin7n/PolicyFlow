@@ -23,9 +23,9 @@ upstream:
 
 # Embedding API for policy classification
 embedding:
-  base_url: ""                       # defaults to upstream base_url if empty
-  api_key: ""                        # defaults to upstream api_key if empty
-  model: text-embedding-3-small
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key: "${DASHSCOPE_API_KEY}"
+  model: text-embedding-v4
   similarity_threshold: 0.75
   timeout: 30
 

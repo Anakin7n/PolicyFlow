@@ -44,7 +44,14 @@ pip install -r requirements.txt
 
 ### 2. 配置
 
-编辑 `policyflow.yaml`，配置上游 API 和策略：
+复制 `.env.example` 为 `.env`，填入你的 API Key：
+
+```bash
+cp .env.example .env
+# 编辑 .env，填写 DASHSCOPE_API_KEY（阿里百炼 Embedding API Key）
+```
+
+然后编辑 `policyflow.yaml` 配置策略和供应商。YAML 中 `${DASHSCOPE_API_KEY}` 会自动从 `.env` 读取。
 
 ```yaml
 # 多供应商：不同模型可以走不同的 API 端点
