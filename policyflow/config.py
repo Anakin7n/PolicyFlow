@@ -101,6 +101,33 @@ class Config:
                     model_map[model].append(name)
         return model_map
 
+    @property
+    def available_models(self) -> list[str]:
+        """Models from providers that have real API keys configured.
+
+        Excludes providers with placeholder keys like ``sk-your-key-here``
+        so capability routing doesn't pick models that would 401 on first call.
+        """
+        result: list[str] = []
+        for model, providers in self._model_provider.items():
+            for p in providers:
+                if self._provider_has_key(p):
+                    result.append(model)
+                    break
+        return result
+
+    def _provider_has_key(self, provider_name: str) -> bool:
+        """Check if a provider's API key looks like a real key (not placeholder)."""
+        cfg = self.get_provider_config(provider_name)
+        key = cfg.get("api_key", "")
+        if not key:
+            return False
+        # Common placeholder patterns from .env.example
+        for hint in ("your-key", "key-here", "-xxx", "ALTAK-"):
+            if hint in key:
+                return False
+        return True
+
     def get_model_provider(self, model_id: str) -> str | None:
         """Return the primary (first-listed) provider for a model, or None."""
         providers = self.get_model_providers(model_id)

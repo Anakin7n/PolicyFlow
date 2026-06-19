@@ -44,6 +44,14 @@ providers:
     api_key: "${KIMI_API_KEY}"
     models:
       - "kimi-k2.6"
+      - "kimi-k2.7-code"
+
+  minimax:
+    base_url: https://api.minimax.io/v1
+    api_key: "${MINIMAX_API_KEY}"
+    models:
+      - "minimax-m3"
+      - "minimax-m2.7"
 
   doubao:
     base_url: https://ark.cn-beijing.volces.com/api/v3
@@ -52,6 +60,9 @@ providers:
       # 填写模型 Model ID 即可（如 doubao-1.6），也可填 Endpoint ID 获得限流/监控等高级能力
       - "doubao-1.6"
       - "doubao-seed-2.0-lite"
+      - "doubao-seed-2.0-code"
+      - "doubao-seed-2.0-pro"
+      - "doubao-seed-code"
 
   # 火山 Coding Plan（Agent 订阅计划，可调用多厂商模型）
   # 排在 glm 前面 → 相同的 glm-5.2 优先走 Coding Plan；没配 key 或挂了自动 fallback 到 glm
@@ -73,6 +84,16 @@ providers:
       - "ernie-speed-pro"
 
   # ── 海外供应商 ───────────────────────────────────────────────
+  google:
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key: "${GOOGLE_API_KEY}"
+    models:
+      - "gemini-2.0-flash"
+      - "gemini-2.5-flash"
+      - "gemini-2.5-pro"
+      - "gemini-3.5-flash"
+      - "gemini-3.1-pro"
+
   anthropic:
     base_url: https://api.anthropic.com
     api_key: "${ANTHROPIC_API_KEY}"
@@ -88,6 +109,9 @@ providers:
     models:
       - "gpt-4o"
       - "gpt-4o-mini"
+      - "gpt-4-turbo"
+      - "gpt-3.5-turbo"
+      - "o1"
       - "o3-mini"
 
 # ── Default upstream (fallback for models not in providers) ────────────
@@ -155,7 +179,7 @@ policies_hybrid:
         "重构", "refactor", "单元测试", "写测试", "test case",
         "报错", "异常", "stacktrace"
       ]
-    route_to: "deepseek-v4-pro"
+    route_to: "glm-5.2"
 
   - name: "数据分析与处理"
     match:
@@ -164,7 +188,7 @@ policies_hybrid:
         "统计", "趋势", "异常值", "数据可视化", "图表",
         "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
       ]
-    route_to: "deepseek-v4-pro"
+    route_to: "glm-5.2"
 
   - name: "文本创作与写作"
     match:
@@ -176,7 +200,7 @@ policies_hybrid:
         "写诗", "写歌词", "故事", "小说", "剧本",
         "扩写", "续写", "改写"
       ]
-    route_to: "glm-5.2"
+    route_to: "deepseek-v4-flash"
 
   - name: "翻译、摘要、格式化"
     match:

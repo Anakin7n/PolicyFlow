@@ -463,7 +463,7 @@ Embedding API 不可用时此阶段自动跳过，请求落到默认策略。这
 
 ### 能力感知路由（智能选模）
 
-不写 `route_to`，系统自己选。根据识别出的**任务类型**（如"代码生成"、"复杂推理"），用对应的 8 维评分权重（代码/数学/推理/写作/多语言/视觉/指令遵循/Agent）对所有可用模型打分——"代码审查"比"代码生成"更看重指令遵循，"复杂推理"比"日常闲聊"更看重逻辑和数学。13 种任务类型的权重内置在 [model_profiles.py](policyflow/model_profiles.py) 里：
+不写 `route_to`，系统自己选。根据识别出的**任务类型**，用对应的 8 维评分权重对所有可用模型打分——**只从填了真实 Key 的供应商中挑**，未填 Key 的不参选。13 种任务类型的权重内置在 [model_profiles.py](policyflow/model_profiles.py) 里：
 
 ```yaml
   - name: "代码生成"
@@ -471,6 +471,11 @@ Embedding API 不可用时此阶段自动跳过，请求落到默认策略。这
       keywords: ["写代码", "SQL查询", "API接口"]
     max_cost_tier: mid                               # 可选：限制预算
 ```
+
+**8 维能力评分的依据**：
+- 每个模型在 8 个维度上有 0-1 分值：代码（HumanEval/SWE-bench）、数学（MATH）、推理（MMLU/GPQA）、写作（MT-Bench）、多语言（SuperCLUE/C-Eval）、视觉（MMMU）、指令遵循（IFEval）、Agent 能力（BFCL/ToolBench）
+- 数据来源：官方模型卡、Chatbot Arena、SuperCLUE 等公开榜单（2026-06）；无基准的模型取同系列已知模型的保守估算
+- **不需要改代码**——觉得某个模型的某项评分不准？直接编辑 [model_profiles.py](policyflow/model_profiles.py) 里对应数字，重启生效
 
 ### 价格分档（max_cost_tier 工作原理）
 
@@ -493,7 +498,7 @@ cost_tiers:
 
 想让 claude-haiku 进 cheap 档？把 `cheap_max` 改到 2.5 即可（haiku 加权均价约 2.0）。
 
-> ⚠️ **价格数据时效性**：[policyflow/cost.py](policyflow/cost.py) 内置的价格表收集于 **2026-06**，覆盖 33 个常用模型，已尽可能贴近各供应商当前官方报价——但 LLM 价格波动大，且部分国产模型 ID 为前瞻性命名，**实际数字可能与最新官方报价存在偏差**。
+> ⚠️ **价格数据时效性**：[policyflow/cost.py](policyflow/cost.py) 内置的价格表收集于 **2026-06**，覆盖 39 个常用模型，已尽可能贴近各供应商当前官方报价——但 LLM 价格波动大，且部分国产模型 ID 为前瞻性命名，**实际数字可能与最新官方报价存在偏差**。
 >
 > **如需调整**：直接编辑 [policyflow/cost.py](policyflow/cost.py) 里 `MODEL_PRICES` 字典对应的元组（`(input_price, output_price)`，单位 USD/百万 token）。生产环境请按各供应商最新报价核对，不要直接基于本仓库的费用报告做计费决策。
 
@@ -640,7 +645,7 @@ X-PolicyFlow-Score: 1.000
 
 ## 成本计算
 
-内置 33 个模型的官方定价（2026-06），成本对比基准为 DeepSeek V4 Pro（国产热门、价格适中）：
+内置 39 个模型的官方定价（2026-06），成本对比基准为 DeepSeek V4 Pro（国产热门、价格适中）：
 
 | 厂商 | 模型 |
 |------|------|
@@ -653,6 +658,7 @@ X-PolicyFlow-Score: 1.000
 | 月之暗面 | Kimi K2.6 |
 | 字节豆包 | Doubao 1.6 / Seed 2.0 Lite |
 | 百度文心 | ERNIE 5.1 / 4.5 Turbo / Speed Pro |
+| MiniMax | M3 / M2.7 |
 
 报告对比公式：`实际花费` vs `如果全用 deepseek-v4-pro 的花费`。金额单位为人民币（¥）。
 
@@ -674,7 +680,7 @@ PolicyFlow/
 │   ├── modifiers.py      # 4 个智能修饰器（Agent/推理/会话/窗口）
 │   ├── cascade.py        # 级联验证器 + LLM-as-Judge
 │   ├── db.py             # SQLite 日志层
-│   ├── cost.py           # 33 个模型定价
+│   ├── cost.py           # 39 个模型定价
 │   ├── model_profiles.py # 模型能力评分（8维）+ 智能选模
 │   ├── optimizer.py      # AI 优化建议引擎
 │   ├── dashboard_tui.py  # 全屏 TUI 仪表盘（Textual）

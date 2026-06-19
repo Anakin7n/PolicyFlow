@@ -100,7 +100,7 @@ class Router:
         When a policy uses `specialty` (capability routing), the best model
         is selected automatically based on capability scores + cost.
         """
-        available = list(self.config._model_provider.keys())
+        available = self.config.available_models
         prompt = _extract_prompt(request)
         token_estimate = _estimate_tokens(prompt)
         has_img = _has_image(request.messages)

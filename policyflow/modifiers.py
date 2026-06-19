@@ -18,18 +18,55 @@ logger = logging.getLogger(__name__)
 
 # Approximate context window sizes (tokens)
 MODEL_WINDOWS: dict[str, int] = {
+    # Claude
     "claude-haiku-4-5": 200_000,
-    "claude-sonnet-4-6": 200_000,
-    "claude-opus-4-8": 200_000,
-    "claude-opus-4-7": 200_000,
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    # OpenAI
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
     "gpt-4-turbo": 128_000,
     "gpt-3.5-turbo": 16_385,
-    "gemini-2.0-flash": 1_000_000,
-    "gemini-2.5-pro": 1_000_000,
+    "o1": 200_000,
+    "o3-mini": 200_000,
+    # Gemini
+    "gemini-2.0-flash": 1_048_576,
+    "gemini-2.5-flash": 1_048_576,
+    "gemini-2.5-pro": 1_048_576,
+    "gemini-3.5-flash": 1_048_576,
+    "gemini-3.1-pro": 1_048_576,
+    # DeepSeek
     "deepseek-v3": 128_000,
     "deepseek-r1": 128_000,
+    "deepseek-v4-pro": 1_000_000,
+    "deepseek-v4-flash": 1_000_000,
+    # Qwen
+    "qwen-max": 32_768,
+    "qwen-plus": 131_072,
+    "qwen-flash": 32_768,
+    "qwen3-235b-a22b": 131_072,
+    "qwen-vl-plus": 128_000,
+    # GLM
+    "glm-5.2": 1_048_576,
+    "glm-5": 1_048_576,
+    "glm-5.1": 1_048_576,
+    # Kimi
+    "kimi-k2.6": 262_144,
+    "kimi-k2.7-code": 262_144,
+    # Doubao
+    "doubao-1.6": 256_000,
+    "doubao-seed-2.0-lite": 256_000,
+    "doubao-seed-2.0-code": 256_000,
+    "doubao-seed-2.0-pro": 256_000,
+    "doubao-seed-code": 256_000,
+    # MiniMax
+    "minimax-m3": 1_000_000,
+    "minimax-m2.7": 204_800,
+    # ERNIE
+    "ernie-5.1": 128_000,
+    "ernie-4.5-turbo": 128_000,
+    "ernie-speed-pro": 128_000,
 }
 
 # Models suitable for reasoning tasks

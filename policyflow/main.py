@@ -134,7 +134,7 @@ async def anthropic_messages(
     success = True
 
     # ── 2. Modifiers ───────────────────────────────────────────
-    available_models = list(proxy.config._model_provider.keys())
+    available_models = proxy.config.available_models
     modifier_result = modifiers.run(openai_req, session_id, available_models)
 
     if modifier_result.has_override:
@@ -272,7 +272,7 @@ async def chat_completions(
     success = True
 
     # ── Step 1: Modifiers (pre-routing overrides) ──────────────────
-    available_models = list(proxy.config._model_provider.keys())
+    available_models = proxy.config.available_models
     modifier_result = modifiers.run(request, session_id, available_models)
 
     if modifier_result.has_override:
