@@ -158,25 +158,21 @@ async def anthropic_messages(
 
     # ── 3. Forward (non-streaming only for cascade support) ────
     if stream:
-        # Streaming: skip cascade, stream Anthropic SSE
         try:
             provider_name = proxy.config.get_model_provider(openai_req.model)
             converter = AnthropicStreamConverter(openai_req.model)
             sse_stream = _anthropic_stream_wrapper(
                 proxy, openai_req, provider_name, converter,
             )
-            return StreamingResponse(
-                sse_stream,
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-PolicyFlow-Policy": route_policy_name,
-                    "X-PolicyFlow-Method": route_method,
-                    "X-PolicyFlow-Score": f"{route_score:.3f}",
-                    "X-PolicyFlow-Model": openai_req.model,
-                },
-            )
+            log_params = {
+                "user": user, "original_model": original_model,
+                "routed_model": openai_req.model, "policy_name": route_policy_name,
+                "method": route_method, "score": route_score,
+                "success": success, "prompt_hash": prompt_hash_val,
+                "prompt_preview": prompt_preview_val,
+            }
+            wrapped = _stream_with_logging(sse_stream, log_params)
+            return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score)
         except Exception:
             success = False
             raise
@@ -303,11 +299,19 @@ async def chat_completions(
     # ── Step 4: Forward + cascade ──────────────────────────────────
     try:
         if request.stream:
-            response = None  # Streaming: can't extract usage for logging
             if cascade.config.enabled and cascade.config.verifier != "rule_only":
                 logger.warning("Cascade validation is not supported for streaming requests")
             provider_name = proxy.config.get_model_provider(request.model)
-            return _stream_response(proxy, request, provider_name, route_policy_name, route_method, route_score)
+            raw_stream = proxy.chat_completion_stream(request, provider_name=provider_name)
+            log_params = {
+                "user": user, "original_model": original_model,
+                "routed_model": request.model, "policy_name": route_policy_name,
+                "method": route_method, "score": route_score,
+                "success": success, "prompt_hash": prompt_hash_val,
+                "prompt_preview": prompt_preview_val,
+            }
+            wrapped = _stream_with_logging(raw_stream, log_params)
+            return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score)
         else:
             response, cascade_attempts, judge_reason_val = await _forward_with_cascade(
                 proxy, cascade, request
@@ -482,6 +486,84 @@ async def _forward_with_cascade(
         return response, cascade_attempts, judge_reason
 
     raise HTTPException(status_code=502, detail="All cascade attempts failed")
+
+
+async def _stream_with_logging(
+    stream: AsyncIterator[bytes],
+    log_params: dict[str, Any],
+) -> AsyncIterator[bytes]:
+    """Wrap a raw SSE stream: yield chunks, log to DB after stream ends."""
+    duration_start = time.time()
+    final_usage: dict[str, int] = {}
+    try:
+        async for chunk in stream:
+            yield chunk
+            # Collect usage from the last SSE data chunk (OpenAI puts usage there)
+            if isinstance(chunk, bytes):
+                try:
+                    text = chunk.decode("utf-8", errors="replace")
+                    if text.startswith("data: ") and '"usage":' in text:
+                        import json
+                        payload = json.loads(text[6:].strip())
+                        u = payload.get("usage", {})
+                        if u:
+                            final_usage = {
+                                "prompt_tokens": u.get("prompt_tokens", 0),
+                                "completion_tokens": u.get("completion_tokens", 0),
+                            }
+                except Exception:
+                    pass
+    finally:
+        duration_ms = int((time.time() - duration_start) * 1000)
+        try:
+            prompt_tokens = final_usage.get("prompt_tokens", 0)
+            completion_tokens = final_usage.get("completion_tokens", 0)
+            estimated_cost = calc_cost(
+                log_params["routed_model"], prompt_tokens, completion_tokens,
+            )
+            compared_cost = calc_compared_cost(prompt_tokens, completion_tokens)
+            db.log_request(
+                user=log_params.get("user", "default"),
+                original_model=log_params.get("original_model", ""),
+                routed_model=log_params.get("routed_model", ""),
+                policy_name=log_params.get("policy_name", ""),
+                method=log_params.get("method", ""),
+                similarity_score=log_params.get("score", 0.0),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+                estimated_cost=estimated_cost,
+                compared_cost=compared_cost,
+                cascade_attempts=0,
+                duration_ms=duration_ms,
+                success=log_params.get("success", True),
+                prompt_hash=log_params.get("prompt_hash", ""),
+                prompt_preview=log_params.get("prompt_preview", ""),
+                judge_reason="",
+            )
+        except Exception as exc:
+            logger.warning("Failed to log streaming request: %s", exc)
+
+
+def _stream_response_from_gen(
+    stream: AsyncIterator[bytes],
+    policy_name: str,
+    method: str,
+    score: float,
+) -> StreamingResponse:
+    """Return a StreamingResponse from an already-constructed async generator."""
+    return StreamingResponse(
+        stream,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "X-PolicyFlow-Policy": policy_name,
+            "X-PolicyFlow-Method": method,
+            "X-PolicyFlow-Score": f"{score:.3f}",
+        },
+    )
 
 
 def _stream_response(

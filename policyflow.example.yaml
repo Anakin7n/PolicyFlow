@@ -103,14 +103,14 @@ embedding:
   base_url: https://ark.cn-beijing.volces.com/api/v3
   api_key: "${EMBEDDING_API_KEY}"
   model: doubao-embedding-vision-250615
-  similarity_threshold: 0.75   # 全局语义匹配阈值（高 → 严格，低 → 宽松）
+  similarity_threshold: 0.5    # 全局语义匹配阈值（与 verify_threshold 一致）
   verify_threshold: 0.5        # 关键词命中后的复核阈值（避免"苹果手机"误中"苹果"水果策略）
   timeout: 30
 
 # ── 价格分档（capability 模式下 max_cost_tier 用） ─────────────
 # 分档以加权平均价（input × 3 + output）/ 4 为准（USD/百万 token）
 # 默认：cheap < 1.0、mid 1.0~5.0、expensive ≥ 5.0
-# 想让 claude-haiku 进 cheap？把 cheap_max 改到 2.5 即可（haiku 平均价约 2.0）
+# 想让 deepseek-r1 进 cheap？把 cheap_max 改到 1.5 即可（r1 加权均价约 0.96）
 cost_tiers:
   cheap_max: 1.0
   mid_max:   5.0
@@ -136,7 +136,7 @@ policies_hybrid:
   - name: "图片理解"
     match:
       has_image: true
-    route_to: "gpt-4o"
+    route_to: "qwen-vl-plus"
 
   - name: "代码生成"
     match:
@@ -146,7 +146,7 @@ policies_hybrid:
         "正则", "regex", "脚本", "shell", "bash",
         "如何实现"
       ]
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "代码审查与调试"
     match:
@@ -155,7 +155,7 @@ policies_hybrid:
         "重构", "refactor", "单元测试", "写测试", "test case",
         "报错", "异常", "stacktrace"
       ]
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "数据分析与处理"
     match:
@@ -164,7 +164,7 @@ policies_hybrid:
         "统计", "趋势", "异常值", "数据可视化", "图表",
         "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
       ]
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "文本创作与写作"
     match:
@@ -176,7 +176,7 @@ policies_hybrid:
         "写诗", "写歌词", "故事", "小说", "剧本",
         "扩写", "续写", "改写"
       ]
-    route_to: "claude-sonnet-4-6"
+    route_to: "glm-5.2"
 
   - name: "翻译、摘要、格式化"
     match:
@@ -188,7 +188,7 @@ policies_hybrid:
         "润色", "polish"
       ]
       max_input_tokens: 800
-    route_to: "claude-haiku-4-5"
+    route_to: "deepseek-v4-flash"
     cascade: true
 
   - name: "复杂推理与分析"
@@ -199,7 +199,7 @@ policies_hybrid:
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
-    route_to: "claude-opus-4-8"
+    route_to: "deepseek-r1"
 
   - name: "系统架构与设计"
     match:
@@ -208,7 +208,7 @@ policies_hybrid:
         "微服务", "高并发", "分布式", "数据库设计"
       ]
       min_input_tokens: 200
-    route_to: "claude-opus-4-8"
+    route_to: "deepseek-r1"
 
   - name: "安全审计与分析"
     match:
@@ -217,7 +217,7 @@ policies_hybrid:
         "渗透", "加密", "鉴权", "授权", "OAuth"
       ]
       min_input_tokens: 150
-    route_to: "claude-opus-4-8"
+    route_to: "deepseek-r1"
 
   - name: "性能分析与调优"
     match:
@@ -226,7 +226,7 @@ policies_hybrid:
         "加速", "慢查询", "优化SQL", "高延迟"
       ]
       min_input_tokens: 150
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "知识问答与学习"
     match:
@@ -238,7 +238,7 @@ policies_hybrid:
         "讲讲", "介绍下", "科普", "解读"
       ]
       min_input_tokens: 60        # 排除"为什么呢"这类闲聊式短问
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "日常闲聊与简单问答"
     match:
@@ -250,12 +250,12 @@ policies_hybrid:
         "什么是", "怎么样", "好吗"
       ]
       max_input_tokens: 150       # 短问句兜住，长文走更深的策略
-    route_to: "claude-haiku-4-5"
+    route_to: "deepseek-v4-flash"
 
   - name: "默认"
     match:
       default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
 # ── 算法全托管（capability 模式使用）───────────────────────────────
 # 不写 route_to — 根据识别出的任务类型，从所有可用模型里算分选最优。
@@ -382,7 +382,7 @@ policies_explicit:
   - name: "图片理解"
     match:
       has_image: true
-    route_to: "gpt-4o"
+    route_to: "qwen-vl-plus"
 
   - name: "代码生成"
     match:
@@ -392,7 +392,7 @@ policies_explicit:
         "正则", "regex", "脚本", "shell", "bash",
         "如何实现"
       ]
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "代码审查与调试"
     match:
@@ -401,7 +401,7 @@ policies_explicit:
         "重构", "refactor", "单元测试", "写测试", "test case",
         "报错", "异常", "stacktrace"
       ]
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "数据分析与处理"
     match:
@@ -410,7 +410,7 @@ policies_explicit:
         "统计", "趋势", "异常值", "数据可视化", "图表",
         "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
       ]
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "文本创作与写作"
     match:
@@ -422,7 +422,7 @@ policies_explicit:
         "写诗", "写歌词", "故事", "小说", "剧本",
         "扩写", "续写", "改写"
       ]
-    route_to: "claude-sonnet-4-6"
+    route_to: "glm-5.2"
 
   - name: "翻译、摘要、格式化"
     match:
@@ -434,7 +434,7 @@ policies_explicit:
         "润色", "polish"
       ]
       max_input_tokens: 800
-    route_to: "claude-haiku-4-5"
+    route_to: "deepseek-v4-flash"
     cascade: true
 
   - name: "复杂推理与分析"
@@ -445,7 +445,7 @@ policies_explicit:
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
-    route_to: "claude-opus-4-8"
+    route_to: "deepseek-r1"
 
   - name: "系统架构与设计"
     match:
@@ -454,7 +454,7 @@ policies_explicit:
         "微服务", "高并发", "分布式", "数据库设计"
       ]
       min_input_tokens: 200
-    route_to: "claude-opus-4-8"
+    route_to: "deepseek-r1"
 
   - name: "安全审计与分析"
     match:
@@ -463,7 +463,7 @@ policies_explicit:
         "渗透", "加密", "鉴权", "授权", "OAuth"
       ]
       min_input_tokens: 150
-    route_to: "claude-opus-4-8"
+    route_to: "deepseek-r1"
 
   - name: "性能分析与调优"
     match:
@@ -472,7 +472,7 @@ policies_explicit:
         "加速", "慢查询", "优化SQL", "高延迟"
       ]
       min_input_tokens: 150
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "知识问答与学习"
     match:
@@ -484,7 +484,7 @@ policies_explicit:
         "讲讲", "介绍下", "科普", "解读"
       ]
       min_input_tokens: 60
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
   - name: "日常闲聊与简单问答"
     match:
@@ -496,12 +496,12 @@ policies_explicit:
         "什么是", "怎么样", "好吗"
       ]
       max_input_tokens: 150
-    route_to: "claude-haiku-4-5"
+    route_to: "deepseek-v4-flash"
 
   - name: "默认"
     match:
       default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
-    route_to: "claude-sonnet-4-6"
+    route_to: "deepseek-v4-pro"
 
 # ══════════════════════════════════════════════════════════════════════
 # 级联验证 — 便宜模型先上，回答不行自动换更贵的。
@@ -514,9 +514,9 @@ cascade:
   judge_prompt_template: ""     # 自定义裁判提示词（空=用默认）
   max_retries: 2                # 最多升级几次
   escalation_chain:             # 升级链条，从便宜到贵
-    - "claude-haiku-4-5"
-    - "claude-sonnet-4-6"
-    - "claude-opus-4-8"
+    - "deepseek-v4-flash"
+    - "deepseek-v4-pro"
+    - "deepseek-r1"
 
 # ══════════════════════════════════════════════════════════════════════
 # 日志 — 记录每次路由决策到 SQLite，用于仪表盘和 AI 优化。
@@ -542,5 +542,5 @@ modifiers:
   context_window_filter: true   # 输入超模型窗口 → 自动换大窗口模型
   session_persistence: true     # 同一会话固定用一个模型
   session_ttl: 1800             # 会话保持时间（秒），默认 30 分钟
-  strongest_model: "claude-opus-4-8"    # Agent 检测的目标模型，"auto"=从可用模型选 Agent 能力+性价比最优
-  reasoning_model: "claude-opus-4-8"    # 推理检测的目标模型，"auto"=从可用模型选推理能力+性价比最优
+  strongest_model: "auto"               # Agent 检测的目标模型，"auto"=从可用模型选 Agent 能力+性价比最优
+  reasoning_model: "auto"               # 推理检测的目标模型，"auto"=从可用模型选推理能力+性价比最优

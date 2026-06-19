@@ -161,7 +161,7 @@ class Config:
 
     @property
     def embedding_threshold(self) -> float:
-        return float(self.data.get("embedding", {}).get("similarity_threshold", 0.75))
+        return float(self.data.get("embedding", {}).get("similarity_threshold", 0.5))
 
     @property
     def embedding_verify_threshold(self) -> float:

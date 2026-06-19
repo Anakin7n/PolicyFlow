@@ -27,7 +27,7 @@ PolicyFlow 是一个独立的 OpenAI 兼容代理，借鉴 [NadirClaw](https://g
   ├── ② 策略匹配（按 YAML policies 从上到下扫）
   │     图片检测 → 命中即停
   │     关键词精确匹配命中 → Embedding 复核语境（≥0.5 才放行，挡掉"苹果"匹"苹果手机"这类歧义）
-  │     未命中 → Embedding 全局语义匹配（阈值 0.75）
+  │     未命中 → Embedding 全局语义匹配（阈值 0.5）
   │     仍未命中 → 走 default 策略
   │     → 命中后确定任务类型（如"代码生成"、"复杂推理"）
   │
@@ -140,7 +140,7 @@ embedding:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1   # ← 改这里
   api_key: "${EMBEDDING_API_KEY}"                                # ← .env 里填对应 key
   model: text-embedding-v4                                       # ← 改这里
-  similarity_threshold: 0.75   # 全局语义匹配阈值
+  similarity_threshold: 0.5   # 全局语义匹配阈值
   verify_threshold: 0.5        # 关键词命中后复核阈值（避免歧义命中）
   timeout: 30
 ```
@@ -400,7 +400,7 @@ routing_mode: hybrid
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `keywords` | string[] | 关键词列表，命中任一即算命中。先精确子串匹配（命中后做 Embedding 复核挡掉歧义），仍未命中再走 Embedding 全局语义匹配（阈值 0.75） |
+| `keywords` | string[] | 关键词列表，命中任一即算命中。先精确子串匹配（命中后做 Embedding 复核挡掉歧义），仍未命中再走 Embedding 全局语义匹配（阈值 0.5） |
 | `max_input_tokens` | int | 输入 token **不超过**这个数才命中。配 `keywords` 用来防止长文被错归 |
 | `min_input_tokens` | int | 输入 token **不小于**这个数才命中。用来过滤掉太短的请求 |
 | `has_image` | bool | 请求含图片才命中（多模态请求） |
@@ -435,12 +435,12 @@ policies:
 
 ### Embedding 全局语义匹配（关键词都没命中时的兜底）
 
-如果关键词阶段没命中（或被复核推翻），路由器会用 prompt 跟所有策略的关键词集合做余弦相似度比较，挑相似度最高的策略——前提是相似度 ≥ `similarity_threshold`（默认 0.75）。
+如果关键词阶段没命中（或被复核推翻），路由器会用 prompt 跟所有策略的关键词集合做余弦相似度比较，挑相似度最高的策略——前提是相似度 ≥ `similarity_threshold`（默认 0.5）。
 
 ```yaml
 # embedding 段配置阈值
 embedding:
-  similarity_threshold: 0.75   # 全局匹配阈值
+  similarity_threshold: 0.5   # 全局匹配阈值
   verify_threshold: 0.5        # 关键词命中后的复核阈值
 ```
 
