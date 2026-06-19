@@ -49,7 +49,7 @@ class Router:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.engine = PolicyEngine(config.policies_data)
+        self.engine = PolicyEngine(config.policies_data, config.routing_mode)
         self.classifier = EmbeddingClassifier(
             base_url=config.embedding_base_url,
             api_key=config.embedding_api_key,
@@ -105,7 +105,11 @@ class Router:
         # Phase 1: Image detection (explicit rule)
         for policy in self.engine.non_default_policies:
             if policy.has_image and has_img:
-                return RouteDecision(policy, "image_match", 1.0, available_models=available)
+                return RouteDecision(
+                    policy, "image_match", 1.0,
+                    available_models=available,
+                    use_capability=self.engine.uses_capability_routing(policy),
+                )
 
         # Phase 2: Keyword exact match (case-insensitive substring)
         for policy in self.engine.non_default_policies:
@@ -118,7 +122,11 @@ class Router:
             if policy.keywords:
                 prompt_lower = prompt.lower()
                 if any(kw.lower() in prompt_lower for kw in policy.keywords):
-                    return RouteDecision(policy, "keyword_match", 1.0, available_models=available)
+                    return RouteDecision(
+                        policy, "keyword_match", 1.0,
+                        available_models=available,
+                        use_capability=self.engine.uses_capability_routing(policy),
+                    )
 
         # Phase 3: Embedding similarity match
         embed_score = 0.0
@@ -129,7 +137,11 @@ class Router:
                 if policy_name:
                     for p in self.engine.policies:
                         if p.name == policy_name:
-                            return RouteDecision(p, "embedding_match", embed_score, available_models=available)
+                            return RouteDecision(
+                                p, "embedding_match", embed_score,
+                                available_models=available,
+                                use_capability=self.engine.uses_capability_routing(p),
+                            )
                 else:
                     logger.info(
                         "Embedding: best match below threshold (max=%.3f, threshold=%.3f)",
@@ -141,7 +153,11 @@ class Router:
         # Phase 4: Default
         default = self.engine.default
         if default:
-            return RouteDecision(default, "default", embed_score, available_models=available)
+            return RouteDecision(
+                default, "default", embed_score,
+                available_models=available,
+                use_capability=self.engine.uses_capability_routing(default),
+            )
 
         # Ultimate fallback: keep original model
         return RouteDecision(None, "passthrough", 0.0, original_model=request.model)
@@ -159,11 +175,12 @@ class RouteDecision:
         score: float,
         original_model: str = "",
         available_models: list[str] | None = None,
+        use_capability: bool = False,
     ) -> None:
         self.policy = policy
         self.method = method
         self.score = score
-        if policy and policy.uses_capability_routing and available_models:
+        if policy and use_capability and available_models:
             best = select_best_model(
                 policy.specialty, available_models,
                 cost_tier=policy.max_cost_tier,

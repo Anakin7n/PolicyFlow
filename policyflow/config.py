@@ -37,9 +37,14 @@ class Config:
         self._model_provider: dict[str, str] = self._build_model_provider_map()
 
     def _load(self) -> dict:
-        if self.path.exists():
-            with open(self.path, encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
+        # Try the user's config first, then the example template
+        candidates = [self.path, Path("policyflow.example.yaml")]
+        for p in candidates:
+            if p.exists():
+                with open(p, encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                    if isinstance(data, dict):
+                        break
         else:
             data = yaml.safe_load(DEFAULT_CONFIG) or {}
 
@@ -148,7 +153,29 @@ class Config:
     # ── Policies ──────────────────────────────────────────────────
 
     @property
+    def routing_mode(self) -> str:
+        """Global routing mode: 'explicit' | 'capability' | 'hybrid' (default).
+
+        - explicit:    All policies use route_to, ignore specialty.
+        - capability:  All policies use specialty, auto-detect if missing.
+        - hybrid:      Per-policy choice (has specialty → capability; else → route_to).
+
+        Override via env: POLICYFLOW_ROUTING_MODE
+        """
+        env = os.getenv("POLICYFLOW_ROUTING_MODE", "")
+        return env or self.data.get("routing_mode", "hybrid")
+
+    @property
     def policies_data(self) -> list[dict]:
+        """Return the active policy set based on routing_mode.
+
+        Mode-specific sets: policies_hybrid / policies_capability / policies_explicit.
+        Falls back to ``policies`` for backward compatibility if the mode key is missing.
+        """
+        key = f"policies_{self.routing_mode}"
+        if key in self.data:
+            return self.data[key]
+        # Fallback for old configs that only have "policies"
         return self.data.get("policies", [])
 
     # ── Cascade ────────────────────────────────────────────────────

@@ -119,7 +119,8 @@ async def chat_completions(
     success = True
 
     # ── Step 1: Modifiers (pre-routing overrides) ──────────────────
-    modifier_result = modifiers.run(request, session_id)
+    available_models = list(proxy.config._model_provider.keys())
+    modifier_result = modifiers.run(request, session_id, available_models)
 
     if modifier_result.has_override:
         request.model = modifier_result.override_model

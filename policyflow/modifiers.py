@@ -234,10 +234,44 @@ class ModifierEngine:
         self.reasoning_model = cfg.get("reasoning_model", "claude-opus-4-8")
         self.sessions = SessionStore(ttl=cfg.get("session_ttl", 1800))
 
+    @staticmethod
+    def _resolve_model(
+        target: str,
+        specialty: str,
+        available_models: list[str],
+    ) -> str:
+        """Resolve a model override, with capability-routing fallback.
+
+        - ``"auto"`` → select_best_model(specialty) from available models
+        - Specific model → use as-is if available, else fall back to auto + warning
+        """
+        from .model_profiles import select_best_model
+
+        if target == "auto":
+            best = select_best_model(specialty, available_models)
+            if best:
+                return best
+            # Ultimate fallback: keep whatever the user already requested
+            return available_models[0] if available_models else target
+
+        if target in available_models:
+            return target
+
+        # Configured model not available — try capability routing
+        logger.warning(
+            "Modifier: %s not in available models, falling back to auto-select for %s",
+            target, specialty,
+        )
+        best = select_best_model(specialty, available_models)
+        if best:
+            return best
+        return available_models[0] if available_models else target
+
     def run(
         self,
         request: ChatCompletionRequest,
         session_id: str | None,
+        available_models: list[str] | None = None,
     ) -> ModifierResult:
         """Run all enabled modifiers. Returns first override found.
 
@@ -247,13 +281,17 @@ class ModifierEngine:
         3. Reasoning detection → reasoning model
         4. Context window → larger-window model
         """
+        available = available_models or []
 
         # Extract prompt text for checks
         prompt = _extract_prompt_text(request)
 
         # 1. Agent detection
         if self.agent_detection and detect_agent(request):
-            return ModifierResult(self.strongest_model, "agent_detected")
+            model = self._resolve_model(
+                self.strongest_model, "Agent工具调用", available,
+            ) if available else self.strongest_model
+            return ModifierResult(model, "agent_detected")
 
         # 2. Session persistence
         if self.session_persistence and session_id:
@@ -263,7 +301,10 @@ class ModifierEngine:
 
         # 3. Reasoning detection
         if self.reasoning_detection and detect_reasoning(prompt):
-            return ModifierResult(self.reasoning_model, "reasoning_detected")
+            model = self._resolve_model(
+                self.reasoning_model, "逻辑分析", available,
+            ) if available else self.reasoning_model
+            return ModifierResult(model, "reasoning_detected")
 
         # 4. Context window filter
         if self.context_window_filter:

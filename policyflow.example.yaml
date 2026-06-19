@@ -1,0 +1,252 @@
+# PolicyFlow configuration
+
+# ── 默认路由模式 ──────────────────────────────────────────────────────
+# 启动时未指定模式时的默认值。可选 hybrid / capability / explicit。
+# 启动菜单里可以临时切换，不修改这里。
+routing_mode: hybrid
+
+# ── Providers: model → base_url + api_key mapping ─────────────────────
+# Each provider maps to a vendor's OpenAI-compatible API endpoint.
+# When a policy routes to a model, PolicyFlow looks up which provider
+# owns that model and forwards the request there directly.
+# Models not listed in any provider fall back to the default upstream.
+providers:
+  # ── 国内供应商 ───────────────────────────────────────────────
+  deepseek:
+    base_url: https://api.deepseek.com
+    api_key: "${DEEPSEEK_API_KEY}"
+    models:
+      - "deepseek-v4-flash"
+      - "deepseek-v4-pro"
+      - "deepseek-v3"
+      - "deepseek-r1"
+
+  qwen:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: "${DASHSCOPE_API_KEY}"
+    models:
+      - "qwen3.7-max"
+      - "qwen3-plus"
+      - "qwen3.5-flash"
+      - "qwen3-235b"
+      - "qwen3-vl-plus"
+
+  glm:
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key: "${ZHIPU_API_KEY}"
+    models:
+      - "glm-5.2"
+      - "glm-5"
+      - "glm-5.1"
+
+  kimi:
+    base_url: https://api.moonshot.cn/v1
+    api_key: "${KIMI_API_KEY}"
+    models:
+      - "kimi-k2.6"
+
+  doubao:
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key: "${DOUBAO_API_KEY}"
+    models:
+      # ⚠️ 豆包 model 字段必须填火山引擎 Endpoint ID（如 ep-20250106xxx），不能填模型名
+      # 去 console.volcengine.com → ARK → 模型推理 → 创建接入点 → 复制 Endpoint ID
+      - "doubao-1.6"
+      - "doubao-seed-2.0-lite"
+
+  ernie:
+    base_url: https://qianfan.baidubce.com/v2
+    api_key: "${QIANFAN_API_KEY}"
+    models:
+      - "ernie-5.1"
+      - "ernie-4.5-turbo"
+      - "ernie-speed-pro"
+
+  # ── 海外供应商 ───────────────────────────────────────────────
+  anthropic:
+    base_url: https://api.anthropic.com
+    api_key: "${ANTHROPIC_API_KEY}"
+    models:
+      - "claude-haiku-4-5"
+      - "claude-sonnet-4-6"
+      - "claude-opus-4-7"
+      - "claude-opus-4-8"
+
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key: "${OPENAI_API_KEY}"
+    models:
+      - "gpt-4o"
+      - "gpt-4o-mini"
+      - "o3-mini"
+
+# ── Default upstream (fallback for models not in providers) ────────────
+# 填你主用的供应商。也可用环境变量 UPSTREAM_BASE_URL / UPSTREAM_API_KEY 覆盖。
+upstream:
+  base_url: https://your-api-endpoint.com/v1
+  api_key: "${UPSTREAM_API_KEY}"
+  timeout: 60
+
+# Embedding API for policy classification
+embedding:
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  api_key: "${EMBEDDING_API_KEY}"
+  model: doubao-embedding-vision-250615
+  similarity_threshold: 0.75
+  timeout: 30
+
+# ══════════════════════════════════════════════════════════════════════
+# 策略列表 — 从上到下依次匹配，命中即停止，都不命中走"默认"。
+#
+# 每条策略指定两件事：
+#   1. 什么请求命中（match: keywords / has_image / 输入长度）
+#   2. 命中后用什么模型（两种方式二选一）：
+#      - 写死模型     → 你指定用哪个，系统不插手
+#      - 声明任务类型 → 系统从你配的所有模型里按能力+价格算分选最优
+#        任务类型可选：代码生成、代码审查、数学推理、逻辑分析、文本创作、
+#                      翻译校对、图片理解、Agent工具调用、通用问答、
+#                      系统设计、安全审计、性能优化
+#        可选限制预算：max_cost_tier 设为 cheap / mid / expensive
+# ══════════════════════════════════════════════════════════════════════
+
+# ── 自由混合（hybrid 模式使用）────────────────────────────────────
+# 每条策略自己决定：写死模型还是让系统选。
+policies_hybrid:
+  - name: "翻译、摘要、格式化"
+    match:
+      keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色"]
+      max_input_tokens: 800
+    route_to: "claude-haiku-4-5"
+    cascade: true
+
+  - name: "代码生成与审查"
+    match:
+      keywords: ["写代码", "debug", "代码审查", "重构", "单元测试",
+                 "SQL查询", "API接口", "算法实现", "修bug"]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "复杂推理与分析"
+    match:
+      keywords: ["数学证明", "架构设计", "策略分析", "技术方案",
+                 "安全审计", "性能优化", "系统设计"]
+      min_input_tokens: 200
+    route_to: "claude-opus-4-8"
+
+  - name: "图片理解"
+    match:
+      has_image: true
+    route_to: "gpt-4o"
+
+  - name: "默认"
+    match:
+      default: true
+    route_to: "claude-sonnet-4-6"
+
+# ── 算法全托管（capability 模式使用）───────────────────────────────
+# 全部声明任务类型，系统帮你选模型。不写 route_to。
+policies_capability:
+  - name: "翻译、摘要、格式化"
+    match:
+      keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色"]
+      max_input_tokens: 800
+    specialty: 翻译校对
+    cascade: true
+
+  - name: "代码生成与审查"
+    match:
+      keywords: ["写代码", "debug", "代码审查", "重构", "单元测试",
+                 "SQL查询", "API接口", "算法实现", "修bug"]
+    specialty: 代码生成
+    max_cost_tier: mid
+
+  - name: "复杂推理与分析"
+    match:
+      keywords: ["数学证明", "架构设计", "策略分析", "技术方案",
+                 "安全审计", "性能优化", "系统设计"]
+      min_input_tokens: 200
+    specialty: 逻辑分析
+
+  - name: "图片理解"
+    match:
+      has_image: true
+    specialty: 图片理解
+
+  - name: "默认"
+    match:
+      default: true
+    specialty: 通用问答
+
+# ── 全指定（explicit 模式使用）────────────────────────────────────
+# 全部写死模型，系统不插手。
+policies_explicit:
+  - name: "翻译、摘要、格式化"
+    match:
+      keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色"]
+      max_input_tokens: 800
+    route_to: "claude-haiku-4-5"
+    cascade: true
+
+  - name: "代码生成与审查"
+    match:
+      keywords: ["写代码", "debug", "代码审查", "重构", "单元测试",
+                 "SQL查询", "API接口", "算法实现", "修bug"]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "复杂推理与分析"
+    match:
+      keywords: ["数学证明", "架构设计", "策略分析", "技术方案",
+                 "安全审计", "性能优化", "系统设计"]
+      min_input_tokens: 200
+    route_to: "claude-opus-4-8"
+
+  - name: "图片理解"
+    match:
+      has_image: true
+    route_to: "gpt-4o"
+
+  - name: "默认"
+    match:
+      default: true
+    route_to: "claude-sonnet-4-6"
+
+# ══════════════════════════════════════════════════════════════════════
+# 级联验证 — 便宜模型先上，回答不行自动换更贵的。
+# 只有策略里开了 cascade: true 的才会触发。
+# ══════════════════════════════════════════════════════════════════════
+cascade:
+  enabled: true
+  verifier: rule_only           # rule_only=纯规则 / llm_judge=AI裁判 / rule_then_llm=先规则再AI
+  judge_model: ""               # 如果用 AI 裁判，指定哪个模型当裁判（空=不用）
+  judge_prompt_template: ""     # 自定义裁判提示词（空=用默认）
+  max_retries: 2                # 最多升级几次
+  escalation_chain:             # 升级链条，从便宜到贵
+    - "claude-haiku-4-5"
+    - "claude-sonnet-4-6"
+    - "claude-opus-4-8"
+
+# ══════════════════════════════════════════════════════════════════════
+# 日志 — 记录每次路由决策到 SQLite，用于仪表盘和 AI 优化。
+# ══════════════════════════════════════════════════════════════════════
+logging:
+  log_prompt_preview: false     # 是否存用户提问原文（关=保护隐私）
+
+# ══════════════════════════════════════════════════════════════════════
+# AI 优化引擎 — 分析历史日志，自动生成策略改进建议。
+# ══════════════════════════════════════════════════════════════════════
+optimizer:
+  enabled: true
+  model: deepseek-v4-flash      # 用哪个便宜模型分析（不贵）
+  max_suggestions: 5            # 最多给几条建议
+
+# ══════════════════════════════════════════════════════════════════════
+# 智能修饰器 — 策略匹配之前运行的规则检查，全是本地判断不调 API。
+# 从上到下依次检查，命中即跳过后续策略匹配。
+# ══════════════════════════════════════════════════════════════════════
+modifiers:
+  agent_detection: true         # 检测到 Agent/工具调用 → 强制用最强模型
+  reasoning_detection: true     # 检测到复杂推理需求 → 切推理模型
+  context_window_filter: true   # 输入超模型窗口 → 自动换大窗口模型
+  session_persistence: true     # 同一会话固定用一个模型
+  session_ttl: 1800             # 会话保持时间（秒），默认 30 分钟
+  strongest_model: "claude-opus-4-8"    # Agent 检测的目标模型，"auto"=从可用模型选 Agent 能力+性价比最优
+  reasoning_model: "claude-opus-4-8"    # 推理检测的目标模型，"auto"=从可用模型选推理能力+性价比最优

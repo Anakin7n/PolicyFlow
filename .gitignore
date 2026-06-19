@@ -8,3 +8,4 @@ dist/
 build/
 .claude/
 *.db
+policyflow.yaml

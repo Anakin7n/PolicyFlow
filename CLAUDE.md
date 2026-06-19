@@ -6,13 +6,15 @@
 
 PolicyFlow 是一个独立的 OpenAI 兼容策略路由代理，不依赖任何第三方中间层。对进入的请求做意图分类，改写 model 字段并切换目标 API 端点，使简单任务走便宜模型、复杂任务走高端模型。技术栈：FastAPI + SQLite + CLI (argparse)。
 
-核心模块 (~2300 行)：
+核心模块：
 - **main.py** — FastAPI 入口，完整的 modifiers → router → cascade → log 管道
-- **config.py** — YAML 配置加载，多供应商解析，环境变量替代
+- **config.py** — YAML 配置加载，多供应商解析，环境变量替代，routing_mode 全局开关
 - **proxy.py** — 多 provider httpx 客户端池，按模型懒加载
 - **router.py** — 四阶段路由决策（image → keyword → embedding → default）
 - **cascade.py** — 规则验证器 + LLM-as-Judge（可选），借鉴 NadirClaw
-- **modifiers.py** — Agent/推理/窗口/会话 四个预路由修饰器
+- **modifiers.py** — Agent/推理/窗口/会话 四个预路由修饰器，含模型可用性降级
+- **model_profiles.py** — 30+ 模型 8 维能力评分 + 12 种任务权重矩阵，智能选模
+- **classifier.py** — Embedding 分类器，支持 OpenAI/豆包多模态两种 Embedding 格式
 - **optimizer.py** — AI 优化引擎，分析日志生成策略改进建议
 - **cli.py** — 5 个 CLI 命令（serve/report/classify/export/optimize）
 - **db.py** — SQLite 日志，schema 迁移，成本查询

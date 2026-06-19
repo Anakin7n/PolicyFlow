@@ -44,11 +44,14 @@ pip install -r requirements.txt
 
 ### 2. 配置
 
-复制 `.env.example` 为 `.env`，填入你的 API Key：
+复制示例文件，填入你自己的设置：
 
 ```bash
-cp .env.example .env
+cp .env.example .env                # API Key
+cp policyflow.example.yaml policyflow.yaml   # 策略配置
 ```
+
+两个文件都已加入 `.gitignore`，不会被提交到 git，放心填。
 
 ### API Key 速查表
 
@@ -56,8 +59,9 @@ cp .env.example .env
 
 | 环境变量 | 用途 | 必填？ |
 |----------|------|--------|
-| `EMBEDDING_API_KEY` | **Embedding 语义分类**（用户自选供应商，对应 `embedding.base_url`） | 可选* |
-| `DEEPSEEK_API_KEY` | 默认 upstream + DeepSeek 模型 | 可选 |
+| `UPSTREAM_API_KEY` | **默认兜底 API**（填你主用的供应商 Key） | **必填** |
+| `EMBEDDING_API_KEY` | **Embedding 语义分类**（用户自选供应商） | 可选* |
+| `DEEPSEEK_API_KEY` | DeepSeek 模型 | 可选 |
 | `DASHSCOPE_API_KEY` | 阿里百炼（通义千问 Qwen 模型） | 可选 |
 | `ZHIPU_API_KEY` | 智谱 GLM 模型 | 可选 |
 | `KIMI_API_KEY` | 月之暗面 Kimi 模型 | 可选 |
@@ -69,6 +73,23 @@ cp .env.example .env
 > \* Embedding API 不可用时，路由自动降级为「关键词精确匹配 + 默认策略」，不影响服务运行。没有填的 provider 对应的模型不可用，路由自动跳过。
 
 只需要填你实际要用到的供应商 Key 即可，不需要全部填写。
+
+### policyflow.yaml 配置清单
+
+打开 `policyflow.yaml`，按以下顺序改：
+
+| 段落 | 作用 |
+|------|------|
+| `providers` | 配置你的模型供应商，每个供应商填 `base_url`、`api_key`（用 `${VAR}` 引用 `.env`）、模型列表。没 Key 的删掉即可 |
+| `upstream` | 未在 providers 中列出的模型走这里，作为默认兜底 |
+| `embedding` | 语义匹配的 Embedding API 地址和模型。不可用时自动降级为关键词匹配 |
+| `routing_mode` | 默认路由模式：`hybrid` / `capability` / `explicit`。启动菜单可临时覆盖 |
+| `policies_hybrid` | hybrid 模式下的策略集，可混用写死模型和算法选模 |
+| `policies_capability` | capability 模式下的策略集，全由算法选模 |
+| `policies_explicit` | explicit 模式下的策略集，全写死模型 |
+| `cascade` | 级联验证：验证方式、升级链条、最大重试次数 |
+| `modifiers` | 四个路由修饰器的开关和目标模型 |
+| `optimizer` | AI 优化引擎：是否启用、用哪个模型分析、最多几条建议 |
 
 ### Embedding 供应商配置
 
@@ -148,7 +169,8 @@ response = client.chat.completions.create(
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入各供应商的 API Key
+cp policyflow.example.yaml policyflow.yaml
+# 编辑 .env + policyflow.yaml，填入你的设置
 docker compose up -d
 ```
 
@@ -202,12 +224,56 @@ scripts\launcher.bat    # 双击或命令行运行
 
   [1] Dashboard   全屏仪表盘
   [2] Serve       启动代理 (0.0.0.0:8000)
+  [3] Classify    测试路由
   [Q] Quit
 ```
 
 ## 策略配置
 
-策略通过 `policyflow.yaml` 定义，支持 4 种匹配方式：
+策略在 `policyflow.yaml` 里定义。每条策略回答两个问题：**什么请求命中它**，以及**命中后用哪个模型**。
+
+### 模型选择：两种方式，按策略混用
+
+命中策略后，最终用哪个模型有两种模式，每一条策略独立选择：
+
+**方式 A：你指定模型**（写死）
+
+```yaml
+- name: "代码生成"
+  match:
+    keywords: ["写代码", "debug"]
+  route_to: "claude-sonnet-4-6"   # 命中后一定用这个模型，你说的算
+```
+
+**方式 B：系统帮你选**（算法选模）
+
+```yaml
+- name: "代码生成"
+  match:
+    keywords: ["写代码", "debug"]
+  specialty: 代码生成              # 不写死模型，声明任务类型，系统算分选最优
+```
+
+系统会根据你配的所有模型的 8 维能力数据 + 实时价格，自动挑出最适合这个任务且价格合理的模型。比如代码任务 DeepSeek V4 Pro 代码分 0.87、价格 $0.43/百万 token，Claude Sonnet 代码分 0.88 但价格 $15/百万 token——系统会选 DeepSeek，能力几乎一样但便宜 34 倍。
+
+两种方式可以混用：重要的策略自己锁死模型，不重要的交给系统。
+
+### 全局开关：一键切换所有策略
+
+`policyflow.yaml` 顶部的 `routing_mode` 可以一键覆盖所有策略的模式，不用逐条改。也可用环境变量 `POLICYFLOW_ROUTING_MODE` 覆盖，重启生效。
+
+| 模式 | 效果 |
+|------|------|
+| `hybrid`（默认） | 每条策略独立决定用方式 A 还是 B，互不干扰 |
+| `explicit` | 所有策略强制方式 A——每一条都必须你指定模型，系统不插手 |
+| `capability` | 所有策略强制方式 B——全交给系统选，没声明任务类型的自动从关键词猜 |
+
+```yaml
+# policyflow.yaml 顶部
+routing_mode: hybrid
+```
+
+### 匹配方式：四种触发条件
 
 ### 关键词匹配（即时生效，不需要 Embedding API）
 
