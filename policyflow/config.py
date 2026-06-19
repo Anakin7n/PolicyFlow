@@ -61,7 +61,11 @@ class Config:
             os.getenv("UPSTREAM_TIMEOUT", data["upstream"].get("timeout", 60))
         )
 
-        # ── Resolve env vars in provider api_keys ────────────────────
+        # ── Resolve ${VAR} placeholders in api_keys ────────────────────
+        # Embedding
+        if "embedding" in data and "api_key" in data["embedding"]:
+            data["embedding"]["api_key"] = _resolve_env(data["embedding"]["api_key"])
+        # Providers
         providers_data = data.get("providers", {})
         if isinstance(providers_data, dict):
             for cfg in providers_data.values():

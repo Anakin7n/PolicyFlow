@@ -48,10 +48,47 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填写 DASHSCOPE_API_KEY（阿里百炼 Embedding API Key）
 ```
 
-然后编辑 `policyflow.yaml` 配置策略和供应商。YAML 中 `${DASHSCOPE_API_KEY}` 会自动从 `.env` 读取。
+### API Key 速查表
+
+所有 Key 在 `.env` 中填写，`policyflow.yaml` 通过 `${VAR_NAME}` 引用，启动时自动解析。
+
+| 环境变量 | 用途 | 必填？ |
+|----------|------|--------|
+| `EMBEDDING_API_KEY` | **Embedding 语义分类**（用户自选供应商，对应 `embedding.base_url`） | 可选* |
+| `DEEPSEEK_API_KEY` | 默认 upstream + DeepSeek 模型 | 可选 |
+| `DASHSCOPE_API_KEY` | 阿里百炼（通义千问 Qwen 模型） | 可选 |
+| `ZHIPU_API_KEY` | 智谱 GLM 模型 | 可选 |
+| `KIMI_API_KEY` | 月之暗面 Kimi 模型 | 可选 |
+| `DOUBAO_API_KEY` | 字节豆包（火山引擎） | 可选 |
+| `QIANFAN_API_KEY` | 百度千帆（文心 ERNIE） | 可选 |
+| `ANTHROPIC_API_KEY` | Anthropic Claude 模型 | 可选 |
+| `OPENAI_API_KEY` | OpenAI GPT 模型 | 可选 |
+
+> \* Embedding API 不可用时，路由自动降级为「关键词精确匹配 + 默认策略」，不影响服务运行。没有填的 provider 对应的模型不可用，路由自动跳过。
+
+只需要填你实际要用到的供应商 Key 即可，不需要全部填写。
+
+### Embedding 供应商配置
+
+Embedding API 用于语义匹配（可选，不用也能跑）。默认配置是阿里百炼，换成其他供应商只需改 `policyflow.yaml` 中 `embedding` 段的三项：
+
+| 供应商 | `base_url` | `model` | 对应 `.env` Key |
+|--------|-----------|---------|-----------------|
+| 阿里百炼（默认） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `text-embedding-v4` | `DASHSCOPE_API_KEY` |
+| OpenAI | `https://api.openai.com/v1` | `text-embedding-3-small` | `OPENAI_API_KEY` |
+| DeepSeek | `https://api.deepseek.com` | _(待 DeepSeek 支持)_ | `DEEPSEEK_API_KEY` |
+
+```yaml
+# policyflow.yaml 中的 embedding 段（按需改 base_url + model）
+embedding:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1   # ← 改这里
+  api_key: "${EMBEDDING_API_KEY}"                                # ← .env 里填对应 key
+  model: text-embedding-v4                                       # ← 改这里
+  similarity_threshold: 0.75
+  timeout: 30
+```
 
 ```yaml
 # 多供应商：不同模型可以走不同的 API 端点

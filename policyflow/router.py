@@ -121,21 +121,27 @@ class Router:
                     return RouteDecision(policy, "keyword_match", 1.0, available_models=available)
 
         # Phase 3: Embedding similarity match
+        embed_score = 0.0
         if prompt and self.classifier.policy_embeddings:
             try:
                 prompt_emb = await self.classifier.embed_prompt(prompt)
-                policy_name, score = self.classifier.match(prompt_emb)
+                policy_name, embed_score = self.classifier.match(prompt_emb)
                 if policy_name:
                     for p in self.engine.policies:
                         if p.name == policy_name:
-                            return RouteDecision(p, "embedding_match", score, available_models=available)
+                            return RouteDecision(p, "embedding_match", embed_score, available_models=available)
+                else:
+                    logger.info(
+                        "Embedding: best match below threshold (max=%.3f, threshold=%.3f)",
+                        embed_score, self.classifier.threshold,
+                    )
             except Exception as exc:
                 logger.warning("Embedding classification failed, falling back to default: %s", exc)
 
         # Phase 4: Default
         default = self.engine.default
         if default:
-            return RouteDecision(default, "default", 0.0, available_models=available)
+            return RouteDecision(default, "default", embed_score, available_models=available)
 
         # Ultimate fallback: keep original model
         return RouteDecision(None, "passthrough", 0.0, original_model=request.model)

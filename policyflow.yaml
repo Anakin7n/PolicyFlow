@@ -83,9 +83,9 @@ upstream:
 
 # Embedding API for policy classification
 embedding:
-  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key: "${DASHSCOPE_API_KEY}"
-  model: text-embedding-v4
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  api_key: "${EMBEDDING_API_KEY}"
+  model: doubao-embedding-vision-250615
   similarity_threshold: 0.75
   timeout: 30
 

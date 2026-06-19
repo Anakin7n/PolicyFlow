@@ -22,13 +22,15 @@ class EmbeddingClassifier:
         self.model = model
         self.threshold = threshold
         self.timeout = timeout
+        # 自动检测：豆包多模态 Embedding 用不同端点和输入格式
+        self._multimodal = model.startswith("doubao-embedding-vision")
         self._client: httpx.AsyncClient | None = None
         # Pre-computed policy embeddings: {policy_name: ndarray}
         self.policy_embeddings: dict[str, np.ndarray] = {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            headers = {"Content-Type": "application/json"}
+            headers = {}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             self._client = httpx.AsyncClient(
@@ -44,18 +46,45 @@ class EmbeddingClassifier:
             self._client = None
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
-        """Call the embedding API, return embeddings for each text."""
+        """Call the embedding API, return embeddings for each text.
+
+        Supports two formats:
+        - openai: {"input": ["text1", "text2"], "model": "..."}  → POST /embeddings
+          Response: {"data": [{"index":0,"embedding":[...]}, ...]}
+        - doubao_multimodal: {"input": [{"type":"text","text":"..."}], ...} → POST /embeddings/multimodal
+          Response: {"data": {"embedding": [...]}} — one embedding per request
+        """
         client = await self._get_client()
-        response = await client.post(
-            "/embeddings",
-            json={"input": texts, "model": self.model},
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Embedding API error {response.status_code}: {response.text[:500]}")
-        data = response.json()
-        # Sort by index to preserve order
-        items = sorted(data["data"], key=lambda x: x["index"])
-        return [item["embedding"] for item in items]
+        if self._multimodal:
+            # Multimodal API returns one embedding per request — call individually
+            embeddings: list[list[float]] = []
+            for t in texts:
+                response = await client.post(
+                    "/embeddings/multimodal",
+                    json={
+                        "model": self.model,
+                        "input": [{"type": "text", "text": t}],
+                    },
+                )
+                if response.status_code != 200:
+                    raise RuntimeError(
+                        f"Embedding API error {response.status_code}: {response.text[:500]}"
+                    )
+                embeddings.append(response.json()["data"]["embedding"])
+            return embeddings
+        else:
+            # OpenAI-compatible: batch all texts in one request
+            response = await client.post(
+                "/embeddings",
+                json={"input": texts, "model": self.model},
+            )
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Embedding API error {response.status_code}: {response.text[:500]}"
+                )
+            data = response.json()
+            items = sorted(data["data"], key=lambda x: x["index"])
+            return [item["embedding"] for item in items]
 
     async def embed_prompt(self, text: str) -> np.ndarray:
         """Embed a single prompt text, return as numpy array."""
