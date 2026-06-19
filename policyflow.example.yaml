@@ -49,8 +49,7 @@ providers:
     base_url: https://ark.cn-beijing.volces.com/api/v3
     api_key: "${DOUBAO_API_KEY}"
     models:
-      # ⚠️ 豆包 model 字段必须填火山引擎 Endpoint ID（如 ep-20250106xxx），不能填模型名
-      # 去 console.volcengine.com → ARK → 模型推理 → 创建接入点 → 复制 Endpoint ID
+      # 填写模型 Model ID 即可（如 doubao-1.6），也可填 Endpoint ID 获得限流/监控等高级能力
       - "doubao-1.6"
       - "doubao-seed-2.0-lite"
 
@@ -97,6 +96,7 @@ upstream:
   base_url: https://your-api-endpoint.com/v1
   api_key: "${UPSTREAM_API_KEY}"
   timeout: 60
+  fallback_model: "deepseek-v4-flash"  # route_to 的模型找不到 provider 时，替换成这个再转发
 
 # Embedding API for policy classification
 embedding:

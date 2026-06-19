@@ -143,6 +143,13 @@ class Config:
     def upstream_timeout(self) -> int:
         return self.data["upstream"]["timeout"]
 
+    @property
+    def upstream_fallback_model(self) -> str:
+        """When a model has no provider, rewrite to this model before forwarding upstream.
+        Empty string = forward as-is (legacy behavior).
+        """
+        return self.data.get("upstream", {}).get("fallback_model", "")
+
     # ── Embedding ─────────────────────────────────────────────────
 
     @property

@@ -29,7 +29,7 @@ class ProxyError(Exception):
         retryable.  Permanent errors (bad request, auth) are not — there is
         no point trying another provider with the same broken payload.
         """
-        return self.status_code in (402, 429, 500, 502, 503, 504) or self.status_code == 0
+        return self.status_code in (401, 402, 429, 500, 502, 503, 504) or self.status_code == 0
 
 
 class UpstreamProxy:
@@ -147,9 +147,19 @@ class UpstreamProxy:
                 last_error = e
                 continue
 
-        raise last_error or ProxyError(
-            f"No provider succeeded for model {model}", status_code=0,
-        )
+        # All providers exhausted (or none declared). Fall back to upstream.
+        fallback = self.config.upstream_fallback_model
+        logger = logging.getLogger(__name__)
+        if not candidates:
+            logger.warning("Model %r not in any provider", model)
+        else:
+            logger.warning(
+                "All providers failed for model %r (last: %s)", model, last_error,
+            )
+        if fallback:
+            logger.warning("Rewriting %r → %r and forwarding to upstream", model, fallback)
+            request.model = fallback
+        return await self.chat_completion(request), "upstream"
 
     async def chat_completion_stream(
         self, request: ChatCompletionRequest, provider_name: str | None = None,

@@ -112,8 +112,8 @@ providers:
 
 | 段落 | 作用 |
 |------|------|
-| `providers` | 配置你的模型供应商，每个供应商填 `base_url`、`api_key`（用 `${VAR}` 引用 `.env`）、模型列表。没 Key 的删掉即可 |
-| `upstream` | 未在 providers 中列出的模型走这里，作为默认兜底 |
+| `providers` | 配置你的模型供应商，每个供应商填 `base_url`、`api_key`（用 `${VAR}` 引用 `.env`）、模型列表。策略 `route_to` 的模型必须出现在某个 provider 里 |
+| `upstream` | 最后兜底：模型找不到可用 provider 时（没声明、Key 无效、额度用完、挂了），请求发到这里并自动改写为 `fallback_model`。没配 `fallback_model` 则原样转发 |
 | `embedding` | 语义匹配的 Embedding API 地址、模型、两个阈值（`similarity_threshold` 全局匹配 / `verify_threshold` 关键词复核）。不可用时自动降级 |
 | `routing_mode` | 默认路由模式：`hybrid` / `capability` / `explicit`。启动菜单可临时覆盖 |
 | `policies_hybrid` | hybrid 模式下的策略集，可混用写死模型和算法选模 |
@@ -534,7 +534,7 @@ providers:
       - "glm-5.2"
 ```
 
-**不需要额外配置字段**——把同一个模型写在多个 provider 下即自动启用容灾。认证错误（401/403）和请求格式错误（400）等**永久性错误不会触发切换**，直接报错（换供应商也解决不了）。
+**不需要额外配置字段**——把同一个模型写在多个 provider 下即自动启用容灾。403（权限不足）和 400（请求格式错误）不会触发切换——换供应商也解决不了。401/402/429/5xx/连接超时均会触发切换。所有 provider 都失败时，最终 fallback 到 upstream，model 按 `upstream.fallback_model` 改写（如配了的话）。
 
 
 ## 智能修饰器
