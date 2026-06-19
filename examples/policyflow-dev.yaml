@@ -23,7 +23,7 @@ providers:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key: "${DASHSCOPE_API_KEY}"
     models:
-      - "qwen3-vl-plus"
+      - "qwen-vl-plus"
 
 upstream:
   base_url: https://api.deepseek.com
@@ -69,12 +69,12 @@ policies:
   - name: "图片理解"
     match:
       has_image: true
-    route_to: "qwen3-vl-plus"
+    route_to: "qwen-vl-plus"
 
   # 默认
   - name: "默认"
     match:
-      default: true
+      default: true               # 兜底：前面规则都没命中走这里
     route_to: "deepseek-v4-pro"
 
 cascade:

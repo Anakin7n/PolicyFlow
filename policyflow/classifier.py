@@ -125,6 +125,19 @@ class EmbeddingClassifier:
             return best_name, best_score
         return None, best_score
 
+    def similarity_to(self, prompt_embedding: np.ndarray, policy_name: str) -> float:
+        """Cosine similarity between a prompt and a single specific policy.
+
+        Used for keyword-match verification: when the keyword stage hits a policy,
+        we re-check that the prompt is *semantically* close to the policy's keyword
+        embedding, to avoid false hits like "苹果手机" matching a "fruit" policy
+        whose keywords contain the word "苹果".
+        """
+        policy_emb = self.policy_embeddings.get(policy_name)
+        if policy_emb is None:
+            return 1.0  # No embedding for this policy → trust the keyword match
+        return self._cosine_similarity(prompt_embedding, policy_emb)
+
     @staticmethod
     def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
         denom = np.linalg.norm(a) * np.linalg.norm(b)

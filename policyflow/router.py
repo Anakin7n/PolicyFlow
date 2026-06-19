@@ -57,6 +57,8 @@ class Router:
             threshold=config.embedding_threshold,
             timeout=config.embedding_timeout,
         )
+        self.verify_threshold = config.embedding_verify_threshold
+        self.cost_tier_thresholds = config.cost_tier_thresholds
         self._initialized = False
 
     async def initialize(self) -> None:
@@ -90,7 +92,8 @@ class Router:
 
         Decision priority:
         1. Image detection → visual model (explicit rule)
-        2. Keyword exact match (cheap, no API call)
+        2. Keyword exact match + Embedding verification (catches false hits like
+           "苹果手机" matching a fruit policy)
         3. Embedding similarity match (main classification path)
         4. Default policy — fallback
 
@@ -102,16 +105,32 @@ class Router:
         token_estimate = _estimate_tokens(prompt)
         has_img = _has_image(request.messages)
 
+        def decide(policy: Policy | None, method: str, score: float) -> RouteDecision:
+            """Construct a RouteDecision with all router-level context wired in."""
+            return RouteDecision(
+                policy, method, score,
+                available_models=available,
+                use_capability=self.engine.uses_capability_routing(policy) if policy else False,
+                cost_tier_thresholds=self.cost_tier_thresholds,
+                original_model=request.model,
+            )
+
         # Phase 1: Image detection (explicit rule)
         for policy in self.engine.non_default_policies:
             if policy.has_image and has_img:
-                return RouteDecision(
-                    policy, "image_match", 1.0,
-                    available_models=available,
-                    use_capability=self.engine.uses_capability_routing(policy),
-                )
+                return decide(policy, "image_match", 1.0)
 
-        # Phase 2: Keyword exact match (case-insensitive substring)
+        # Embed the prompt once — reused by both keyword verification and
+        # global embedding match. None if embedding API is unavailable, in
+        # which case keyword matches are trusted without verification.
+        prompt_emb = None
+        if prompt and self.classifier.policy_embeddings:
+            try:
+                prompt_emb = await self.classifier.embed_prompt(prompt)
+            except Exception as exc:
+                logger.warning("Embedding API unavailable, keyword matches will not be verified: %s", exc)
+
+        # Phase 2: Keyword exact match + embedding verification
         for policy in self.engine.non_default_policies:
             if policy.has_image:
                 continue
@@ -119,29 +138,33 @@ class Router:
                 continue
             if policy.min_input_tokens and token_estimate < policy.min_input_tokens:
                 continue
-            if policy.keywords:
-                prompt_lower = prompt.lower()
-                if any(kw.lower() in prompt_lower for kw in policy.keywords):
-                    return RouteDecision(
-                        policy, "keyword_match", 1.0,
-                        available_models=available,
-                        use_capability=self.engine.uses_capability_routing(policy),
-                    )
+            if not policy.keywords:
+                continue
+            prompt_lower = prompt.lower()
+            if not any(kw.lower() in prompt_lower for kw in policy.keywords):
+                continue
+
+            # Keyword hit — verify with embedding similarity if available.
+            # If embedding is down, trust the keyword (graceful degradation).
+            if prompt_emb is None:
+                return decide(policy, "keyword_match", 1.0)
+            similarity = self.classifier.similarity_to(prompt_emb, policy.name)
+            if similarity >= self.verify_threshold:
+                return decide(policy, "keyword_verified", similarity)
+            logger.info(
+                "Keyword hit on policy %r overridden by verification (similarity=%.3f < %.3f)",
+                policy.name, similarity, self.verify_threshold,
+            )
 
         # Phase 3: Embedding similarity match
         embed_score = 0.0
-        if prompt and self.classifier.policy_embeddings:
+        if prompt_emb is not None:
             try:
-                prompt_emb = await self.classifier.embed_prompt(prompt)
                 policy_name, embed_score = self.classifier.match(prompt_emb)
                 if policy_name:
                     for p in self.engine.policies:
                         if p.name == policy_name:
-                            return RouteDecision(
-                                p, "embedding_match", embed_score,
-                                available_models=available,
-                                use_capability=self.engine.uses_capability_routing(p),
-                            )
+                            return decide(p, "embedding_match", embed_score)
                 else:
                     logger.info(
                         "Embedding: best match below threshold (max=%.3f, threshold=%.3f)",
@@ -153,14 +176,10 @@ class Router:
         # Phase 4: Default
         default = self.engine.default
         if default:
-            return RouteDecision(
-                default, "default", embed_score,
-                available_models=available,
-                use_capability=self.engine.uses_capability_routing(default),
-            )
+            return decide(default, "default", embed_score)
 
         # Ultimate fallback: keep original model
-        return RouteDecision(None, "passthrough", 0.0, original_model=request.model)
+        return decide(None, "passthrough", 0.0)
 
 
 class RouteDecision:
@@ -176,6 +195,7 @@ class RouteDecision:
         original_model: str = "",
         available_models: list[str] | None = None,
         use_capability: bool = False,
+        cost_tier_thresholds: dict[str, float] | None = None,
     ) -> None:
         self.policy = policy
         self.method = method
@@ -184,6 +204,7 @@ class RouteDecision:
             best = select_best_model(
                 policy.specialty, available_models,
                 cost_tier=policy.max_cost_tier,
+                cost_tier_thresholds=cost_tier_thresholds,
             )
             self.target_model = best or policy.route_to or original_model
             if best:

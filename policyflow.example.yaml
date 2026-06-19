@@ -25,11 +25,11 @@ providers:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key: "${DASHSCOPE_API_KEY}"
     models:
-      - "qwen3.7-max"
-      - "qwen3-plus"
-      - "qwen3.5-flash"
-      - "qwen3-235b"
-      - "qwen3-vl-plus"
+      - "qwen-max"
+      - "qwen-plus"
+      - "qwen-flash"
+      - "qwen3-235b-a22b"
+      - "qwen-vl-plus"
 
   glm:
     base_url: https://open.bigmodel.cn/api/paas/v4
@@ -92,8 +92,17 @@ embedding:
   base_url: https://ark.cn-beijing.volces.com/api/v3
   api_key: "${EMBEDDING_API_KEY}"
   model: doubao-embedding-vision-250615
-  similarity_threshold: 0.75
+  similarity_threshold: 0.75   # 全局语义匹配阈值（高 → 严格，低 → 宽松）
+  verify_threshold: 0.5        # 关键词命中后的复核阈值（避免"苹果手机"误中"苹果"水果策略）
   timeout: 30
+
+# ── 价格分档（capability 模式下 max_cost_tier 用） ─────────────
+# 分档以加权平均价（input × 3 + output）/ 4 为准（USD/百万 token）
+# 默认：cheap < 1.0、mid 1.0~5.0、expensive ≥ 5.0
+# 想让 claude-haiku 进 cheap？把 cheap_max 改到 2.5 即可（haiku 平均价约 2.0）
+cost_tiers:
+  cheap_max: 1.0
+  mid_max:   5.0
 
 # ══════════════════════════════════════════════════════════════════════
 # 策略列表 — 从上到下依次匹配，命中即停止，都不命中走"默认"。
@@ -111,102 +120,295 @@ embedding:
 
 # ── 自由混合（hybrid 模式使用）────────────────────────────────────
 # 每条策略自己决定：写死模型还是让系统选。
+# 顺序原则：从最具体到最泛，命中即停。
 policies_hybrid:
-  - name: "翻译、摘要、格式化"
-    match:
-      keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色"]
-      max_input_tokens: 800
-    route_to: "claude-haiku-4-5"
-    cascade: true
-
-  - name: "代码生成与审查"
-    match:
-      keywords: ["写代码", "debug", "代码审查", "重构", "单元测试",
-                 "SQL查询", "API接口", "算法实现", "修bug"]
-    route_to: "claude-sonnet-4-6"
-
-  - name: "复杂推理与分析"
-    match:
-      keywords: ["数学证明", "架构设计", "策略分析", "技术方案",
-                 "安全审计", "性能优化", "系统设计"]
-      min_input_tokens: 200
-    route_to: "claude-opus-4-8"
-
   - name: "图片理解"
     match:
       has_image: true
     route_to: "gpt-4o"
 
+  - name: "代码生成与审查"
+    match:
+      keywords: [
+        "写代码", "写个", "写一段", "写一个函数", "写一个类",
+        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
+        "重构", "refactor", "单元测试", "写测试", "test case",
+        "SQL查询", "SQL语句", "API接口", "REST", "算法实现",
+        "正则", "regex", "脚本", "shell", "bash",
+        "报错", "异常", "stacktrace", "如何实现"
+      ]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "数据分析与处理"
+    match:
+      keywords: [
+        "分析数据", "数据分析", "Excel", "CSV", "表格", "电子表格",
+        "统计", "趋势", "异常值", "数据可视化", "图表",
+        "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
+      ]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "文本创作与写作"
+    match:
+      keywords: [
+        "写一封", "写一篇", "写个文案", "写文案", "起标题", "起个标题",
+        "公众号", "微博", "朋友圈", "小红书", "知乎",
+        "邮件", "求职信", "简历", "自荐", "求职",
+        "产品介绍", "产品文案", "广告语", "slogan",
+        "写诗", "写歌词", "故事", "小说", "剧本",
+        "扩写", "续写", "改写"
+      ]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "翻译、摘要、格式化"
+    match:
+      keywords: [
+        "翻译", "translate", "译成", "中译英", "英译中",
+        "摘要", "总结", "summarize", "概括", "提炼要点",
+        "格式化", "排版", "整理格式",
+        "纠错", "校对", "改错别字", "修改语法",
+        "润色", "polish"
+      ]
+      max_input_tokens: 800
+    route_to: "claude-haiku-4-5"
+    cascade: true
+
+  - name: "复杂推理与分析"
+    match:
+      keywords: [
+        "数学证明", "证明", "推导", "求证",
+        "架构设计", "系统设计", "技术方案", "技术选型",
+        "策略分析", "战略", "决策", "方案对比", "tradeoff", "权衡",
+        "安全审计", "安全分析", "威胁建模",
+        "性能优化", "性能分析", "瓶颈", "调优",
+        "复盘", "深度分析", "评估"
+      ]
+      min_input_tokens: 200
+    route_to: "claude-opus-4-8"
+
+  - name: "知识问答与学习"
+    match:
+      keywords: [
+        "为什么", "原理", "工作原理", "运作机制", "机制",
+        "原因", "缘由", "由来", "起源", "历史",
+        "区别", "差异", "vs", "...的不同",
+        "怎么学", "如何学", "怎么入门", "入门",
+        "讲讲", "介绍下", "科普", "解读"
+      ]
+      min_input_tokens: 60        # 排除"为什么呢"这类闲聊式短问
+    route_to: "claude-sonnet-4-6"
+
+  - name: "日常闲聊与简单问答"
+    match:
+      keywords: [
+        "你好", "hi", "hello", "在吗", "在不在",
+        "谢谢", "感谢", "thanks",
+        "晚安", "早上好", "下午好",
+        "你是谁", "你叫什么", "你能做什么", "你会什么",
+        "什么是", "怎么样", "好吗"
+      ]
+      max_input_tokens: 150       # 短问句兜住，长文走更深的策略
+    route_to: "claude-haiku-4-5"
+
   - name: "默认"
     match:
-      default: true
+      default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
     route_to: "claude-sonnet-4-6"
 
 # ── 算法全托管（capability 模式使用）───────────────────────────────
 # 全部声明任务类型，系统帮你选模型。不写 route_to。
 policies_capability:
-  - name: "翻译、摘要、格式化"
-    match:
-      keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色"]
-      max_input_tokens: 800
-    specialty: 翻译校对
-    cascade: true
-
-  - name: "代码生成与审查"
-    match:
-      keywords: ["写代码", "debug", "代码审查", "重构", "单元测试",
-                 "SQL查询", "API接口", "算法实现", "修bug"]
-    specialty: 代码生成
-    max_cost_tier: mid
-
-  - name: "复杂推理与分析"
-    match:
-      keywords: ["数学证明", "架构设计", "策略分析", "技术方案",
-                 "安全审计", "性能优化", "系统设计"]
-      min_input_tokens: 200
-    specialty: 逻辑分析
-
   - name: "图片理解"
     match:
       has_image: true
     specialty: 图片理解
 
+  - name: "代码生成与审查"
+    match:
+      keywords: [
+        "写代码", "写个", "写一段", "写一个函数", "写一个类",
+        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
+        "重构", "refactor", "单元测试", "写测试", "test case",
+        "SQL查询", "SQL语句", "API接口", "REST", "算法实现",
+        "正则", "regex", "脚本", "shell", "bash",
+        "报错", "异常", "stacktrace", "如何实现"
+      ]
+    specialty: 代码生成
+    max_cost_tier: mid
+
+  - name: "数据分析与处理"
+    match:
+      keywords: [
+        "分析数据", "数据分析", "Excel", "CSV", "表格", "电子表格",
+        "统计", "趋势", "异常值", "数据可视化", "图表",
+        "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
+      ]
+    specialty: 逻辑分析
+    max_cost_tier: mid
+
+  - name: "文本创作与写作"
+    match:
+      keywords: [
+        "写一封", "写一篇", "写个文案", "写文案", "起标题", "起个标题",
+        "公众号", "微博", "朋友圈", "小红书", "知乎",
+        "邮件", "求职信", "简历", "自荐", "求职",
+        "产品介绍", "产品文案", "广告语", "slogan",
+        "写诗", "写歌词", "故事", "小说", "剧本",
+        "扩写", "续写", "改写"
+      ]
+    specialty: 文本创作
+
+  - name: "翻译、摘要、格式化"
+    match:
+      keywords: [
+        "翻译", "translate", "译成", "中译英", "英译中",
+        "摘要", "总结", "summarize", "概括", "提炼要点",
+        "格式化", "排版", "整理格式",
+        "纠错", "校对", "改错别字", "修改语法",
+        "润色", "polish"
+      ]
+      max_input_tokens: 800
+    specialty: 翻译校对
+    cascade: true
+
+  - name: "复杂推理与分析"
+    match:
+      keywords: [
+        "数学证明", "证明", "推导", "求证",
+        "架构设计", "系统设计", "技术方案", "技术选型",
+        "策略分析", "战略", "决策", "方案对比", "tradeoff", "权衡",
+        "安全审计", "安全分析", "威胁建模",
+        "性能优化", "性能分析", "瓶颈", "调优",
+        "复盘", "深度分析", "评估"
+      ]
+      min_input_tokens: 200
+    specialty: 逻辑分析
+
+  - name: "知识问答与学习"
+    match:
+      keywords: [
+        "为什么", "原理", "工作原理", "运作机制", "机制",
+        "原因", "缘由", "由来", "起源", "历史",
+        "区别", "差异", "vs", "...的不同",
+        "怎么学", "如何学", "怎么入门", "入门",
+        "讲讲", "介绍下", "科普", "解读"
+      ]
+      min_input_tokens: 60
+    specialty: 通用问答
+    max_cost_tier: mid
+
+  - name: "日常闲聊与简单问答"
+    match:
+      keywords: [
+        "你好", "hi", "hello", "在吗", "在不在",
+        "谢谢", "感谢", "thanks",
+        "晚安", "早上好", "下午好",
+        "你是谁", "你叫什么", "你能做什么", "你会什么",
+        "什么是", "怎么样", "好吗"
+      ]
+      max_input_tokens: 150
+    specialty: 通用问答
+    max_cost_tier: cheap          # 限定只在便宜档里挑
+
   - name: "默认"
     match:
-      default: true
+      default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
     specialty: 通用问答
 
 # ── 全指定（explicit 模式使用）────────────────────────────────────
 # 全部写死模型，系统不插手。
 policies_explicit:
-  - name: "翻译、摘要、格式化"
-    match:
-      keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色"]
-      max_input_tokens: 800
-    route_to: "claude-haiku-4-5"
-    cascade: true
-
-  - name: "代码生成与审查"
-    match:
-      keywords: ["写代码", "debug", "代码审查", "重构", "单元测试",
-                 "SQL查询", "API接口", "算法实现", "修bug"]
-    route_to: "claude-sonnet-4-6"
-
-  - name: "复杂推理与分析"
-    match:
-      keywords: ["数学证明", "架构设计", "策略分析", "技术方案",
-                 "安全审计", "性能优化", "系统设计"]
-      min_input_tokens: 200
-    route_to: "claude-opus-4-8"
-
   - name: "图片理解"
     match:
       has_image: true
     route_to: "gpt-4o"
 
+  - name: "代码生成与审查"
+    match:
+      keywords: [
+        "写代码", "写个", "写一段", "写一个函数", "写一个类",
+        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
+        "重构", "refactor", "单元测试", "写测试", "test case",
+        "SQL查询", "SQL语句", "API接口", "REST", "算法实现",
+        "正则", "regex", "脚本", "shell", "bash",
+        "报错", "异常", "stacktrace", "如何实现"
+      ]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "数据分析与处理"
+    match:
+      keywords: [
+        "分析数据", "数据分析", "Excel", "CSV", "表格", "电子表格",
+        "统计", "趋势", "异常值", "数据可视化", "图表",
+        "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
+      ]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "文本创作与写作"
+    match:
+      keywords: [
+        "写一封", "写一篇", "写个文案", "写文案", "起标题", "起个标题",
+        "公众号", "微博", "朋友圈", "小红书", "知乎",
+        "邮件", "求职信", "简历", "自荐", "求职",
+        "产品介绍", "产品文案", "广告语", "slogan",
+        "写诗", "写歌词", "故事", "小说", "剧本",
+        "扩写", "续写", "改写"
+      ]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "翻译、摘要、格式化"
+    match:
+      keywords: [
+        "翻译", "translate", "译成", "中译英", "英译中",
+        "摘要", "总结", "summarize", "概括", "提炼要点",
+        "格式化", "排版", "整理格式",
+        "纠错", "校对", "改错别字", "修改语法",
+        "润色", "polish"
+      ]
+      max_input_tokens: 800
+    route_to: "claude-haiku-4-5"
+    cascade: true
+
+  - name: "复杂推理与分析"
+    match:
+      keywords: [
+        "数学证明", "证明", "推导", "求证",
+        "架构设计", "系统设计", "技术方案", "技术选型",
+        "策略分析", "战略", "决策", "方案对比", "tradeoff", "权衡",
+        "安全审计", "安全分析", "威胁建模",
+        "性能优化", "性能分析", "瓶颈", "调优",
+        "复盘", "深度分析", "评估"
+      ]
+      min_input_tokens: 200
+    route_to: "claude-opus-4-8"
+
+  - name: "知识问答与学习"
+    match:
+      keywords: [
+        "为什么", "原理", "工作原理", "运作机制", "机制",
+        "原因", "缘由", "由来", "起源", "历史",
+        "区别", "差异", "vs", "...的不同",
+        "怎么学", "如何学", "怎么入门", "入门",
+        "讲讲", "介绍下", "科普", "解读"
+      ]
+      min_input_tokens: 60
+    route_to: "claude-sonnet-4-6"
+
+  - name: "日常闲聊与简单问答"
+    match:
+      keywords: [
+        "你好", "hi", "hello", "在吗", "在不在",
+        "谢谢", "感谢", "thanks",
+        "晚安", "早上好", "下午好",
+        "你是谁", "你叫什么", "你能做什么", "你会什么",
+        "什么是", "怎么样", "好吗"
+      ]
+      max_input_tokens: 150
+    route_to: "claude-haiku-4-5"
+
   - name: "默认"
     match:
-      default: true
+      default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
     route_to: "claude-sonnet-4-6"
 
 # ══════════════════════════════════════════════════════════════════════

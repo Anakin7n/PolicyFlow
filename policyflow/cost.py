@@ -3,6 +3,20 @@
 Prices per 1M tokens (input / output) in USD.
 Domestic Chinese models (CNY) converted at ~7.2 CNY/USD where int'l pricing unavailable.
 
+⚠️  PRICE DATA DISCLAIMER  ──────────────────────────────────────────
+The numbers below were collected against vendor pricing pages on the
+date stamped in the source list, but LLM pricing changes frequently
+and some model IDs in this file may be vendor-specific or forward-
+looking placeholders that do not match a model you can actually call.
+
+Before relying on cost reports for billing decisions:
+  1. Cross-check rates with each vendor's current pricing page
+  2. Treat unknown model IDs as the (1.00, 1.00) USD/M fallback (see
+     `_lookup_price`) — they will still log, but the dollar figures
+     are nominal
+  3. To override a price without editing source, file an issue or
+     monkey-patch MODEL_PRICES at startup
+
 Sources (2026-06):
   anthropic.com/pricing, openai.com/api/pricing, ai.google.dev/pricing,
   api-docs.deepseek.com, help.aliyun.com/zh/model-studio/model-pricing,
@@ -42,11 +56,11 @@ MODEL_PRICES: dict[str, tuple[float, float]] = {
     "deepseek-r1": (0.55, 2.19),
 
     # ── 阿里通义千问 Qwen ──────────────────────────────────────
-    "qwen3.7-max": (2.50, 7.50),
-    "qwen3-plus": (0.60, 3.60),
-    "qwen3.5-flash": (0.10, 0.40),
-    "qwen3-235b": (0.84, 3.36),
-    "qwen3-vl-plus": (0.24, 1.92),
+    "qwen-max": (2.50, 7.50),
+    "qwen-plus": (0.60, 3.60),
+    "qwen-flash": (0.10, 0.40),
+    "qwen3-235b-a22b": (0.84, 3.36),
+    "qwen-vl-plus": (0.24, 1.92),
 
     # ── 智谱 GLM ──────────────────────────────────────────────
     "glm-5.2": (1.40, 4.40),

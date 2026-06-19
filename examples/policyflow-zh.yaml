@@ -24,7 +24,7 @@ providers:
     api_key: "${DASHSCOPE_API_KEY}"
     models:
       - "qwen-max"
-      - "qwen3.5-flash"
+      - "qwen-flash"
 
 upstream:
   base_url: https://api.deepseek.com
@@ -41,7 +41,7 @@ policies:
     match:
       keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色", "总结"]
       max_input_tokens: 800
-    route_to: "qwen3.5-flash"
+    route_to: "qwen-flash"
     cascade: true
 
   # 通用办公 → 性价比
@@ -67,14 +67,14 @@ policies:
   # 默认
   - name: "默认"
     match:
-      default: true
+      default: true               # 兜底：前面规则都没命中走这里
     route_to: "deepseek-v4-flash"
 
 cascade:
   enabled: true
   max_retries: 2
   escalation_chain:
-    - "qwen3.5-flash"
+    - "qwen-flash"
     - "deepseek-v4-flash"
     - "claude-sonnet-4-6"
 

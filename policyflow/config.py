@@ -147,8 +147,33 @@ class Config:
         return float(self.data.get("embedding", {}).get("similarity_threshold", 0.75))
 
     @property
+    def embedding_verify_threshold(self) -> float:
+        """Threshold for keyword-match verification — looser than the main threshold.
+
+        After a keyword match, the prompt is re-embedded against the matched
+        policy. If similarity drops below this value, the keyword hit is
+        treated as a false positive (e.g. "苹果手机" hitting a fruit policy)
+        and routing falls through to embedding global match.
+        """
+        return float(self.data.get("embedding", {}).get("verify_threshold", 0.5))
+
+    @property
     def embedding_timeout(self) -> int:
         return int(self.data.get("embedding", {}).get("timeout", 30))
+
+    @property
+    def cost_tier_thresholds(self) -> dict[str, float]:
+        """USD/M-token boundaries for `max_cost_tier: cheap|mid|expensive`.
+
+        Defaults to {cheap_max: 1.0, mid_max: 5.0}. Tiers are computed against
+        the weighted average_cost (3:1 input:output), so e.g. claude-haiku
+        (input 1.0 / output 5.0 → avg 2.0) lands in mid by default.
+        """
+        cfg = self.data.get("cost_tiers", {})
+        return {
+            "cheap_max": float(cfg.get("cheap_max", 1.0)),
+            "mid_max": float(cfg.get("mid_max", 5.0)),
+        }
 
     # ── Policies ──────────────────────────────────────────────────
 

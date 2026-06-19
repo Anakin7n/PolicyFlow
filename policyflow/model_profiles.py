@@ -41,7 +41,14 @@ class ModelProfile:
     # ── Derived ──
     @property
     def average_cost(self) -> float:
-        return (self.cost_per_1m_input + self.cost_per_1m_output) / 2
+        """Weighted average price per 1M tokens, assuming a 3:1 input:output usage ratio.
+
+        Real-world chat/RAG/agent traffic skews input-heavy (long prompts/context, short
+        completions). A naive (input + output) / 2 over-weights output prices and would
+        push models with cheap input but expensive output (e.g. claude-haiku at 1.0/5.0)
+        into a costlier tier than they actually are in practice.
+        """
+        return (self.cost_per_1m_input * 3 + self.cost_per_1m_output) / 4
 
     @property
     def capability_vector(self) -> list[float]:
@@ -149,37 +156,37 @@ PROFILES: dict[str, ModelProfile] = {
     ),
 
     # ── Qwen ───────────────────────────────────────────────────
-    "qwen3.7-max": ModelProfile(
-        model_id="qwen3.7-max",
+    "qwen-max": ModelProfile(
+        model_id="qwen-max",
         code=0.85, math=0.86, reasoning=0.86, writing=0.82,
         multilingual=0.95,  # top Chinese capability
         vision=0.0, instruction_following=0.84,
         agent_capable=0.75, context_window=128_000,
         cost_per_1m_input=2.5, cost_per_1m_output=7.5,
     ),
-    "qwen3-plus": ModelProfile(
-        model_id="qwen3-plus",
+    "qwen-plus": ModelProfile(
+        model_id="qwen-plus",
         code=0.75, math=0.74, reasoning=0.76, writing=0.78,
         multilingual=0.90, vision=0.0, instruction_following=0.78,
         agent_capable=0.60, context_window=128_000,
         cost_per_1m_input=0.60, cost_per_1m_output=3.6,
     ),
-    "qwen3.5-flash": ModelProfile(
-        model_id="qwen3.5-flash",
+    "qwen-flash": ModelProfile(
+        model_id="qwen-flash",
         code=0.62, math=0.58, reasoning=0.60, writing=0.72,
         multilingual=0.88, vision=0.0, instruction_following=0.68,
         agent_capable=0.35, context_window=128_000,
         cost_per_1m_input=0.10, cost_per_1m_output=0.40,
     ),
-    "qwen3-235b": ModelProfile(
-        model_id="qwen3-235b",
+    "qwen3-235b-a22b": ModelProfile(
+        model_id="qwen3-235b-a22b",
         code=0.82, math=0.83, reasoning=0.84, writing=0.80,
         multilingual=0.92, vision=0.0, instruction_following=0.82,
         agent_capable=0.70, context_window=128_000,
         cost_per_1m_input=0.84, cost_per_1m_output=3.36,
     ),
-    "qwen3-vl-plus": ModelProfile(
-        model_id="qwen3-vl-plus",
+    "qwen-vl-plus": ModelProfile(
+        model_id="qwen-vl-plus",
         code=0.60, math=0.55, reasoning=0.62, writing=0.68,
         multilingual=0.85, vision=0.82, instruction_following=0.70,
         agent_capable=0.30, context_window=128_000,
@@ -308,11 +315,21 @@ def score_model(
 import math
 
 
+# Cost-tier boundaries (USD per 1M tokens, applied to weighted average_cost).
+# Override at runtime via Config.cost_tier_thresholds; see policyflow.example.yaml.
+DEFAULT_COST_TIER_THRESHOLDS: dict[str, float] = {
+    "cheap_max": 1.0,   # average_cost < this → cheap
+    "mid_max":   5.0,   # cheap_max ≤ average_cost < this → mid
+                        # ≥ mid_max → expensive
+}
+
+
 def select_best_model(
     specialty: str,
     available_models: list[str],
     cost_tier: str = "",
     budget_weight: float = 0.3,
+    cost_tier_thresholds: dict[str, float] | None = None,
 ) -> str | None:
     """Pick the best model for a task type from available candidates.
 
@@ -321,6 +338,8 @@ def select_best_model(
         available_models: list of model IDs that are configured and available
         cost_tier: optional budget filter ("cheap" / "mid" / "expensive")
         budget_weight: how much to weigh cost vs capability (0=only capability, 1=only cost)
+        cost_tier_thresholds: optional override for tier boundaries
+            (defaults to DEFAULT_COST_TIER_THRESHOLDS)
 
     Returns the highest-scoring model ID, or None if no match.
     """
@@ -337,12 +356,16 @@ def select_best_model(
         return None
 
     # Filter by cost tier if specified
-    if cost_tier == "cheap":
-        candidates = [(m, p) for m, p in candidates if p.average_cost < 1.0]
-    elif cost_tier == "mid":
-        candidates = [(m, p) for m, p in candidates if 1.0 <= p.average_cost < 5.0]
-    elif cost_tier == "expensive":
-        candidates = [(m, p) for m, p in candidates if p.average_cost >= 5.0]
+    if cost_tier in ("cheap", "mid", "expensive"):
+        thresholds = cost_tier_thresholds or DEFAULT_COST_TIER_THRESHOLDS
+        cheap_max = thresholds.get("cheap_max", DEFAULT_COST_TIER_THRESHOLDS["cheap_max"])
+        mid_max = thresholds.get("mid_max", DEFAULT_COST_TIER_THRESHOLDS["mid_max"])
+        if cost_tier == "cheap":
+            candidates = [(m, p) for m, p in candidates if p.average_cost < cheap_max]
+        elif cost_tier == "mid":
+            candidates = [(m, p) for m, p in candidates if cheap_max <= p.average_cost < mid_max]
+        else:  # expensive
+            candidates = [(m, p) for m, p in candidates if p.average_cost >= mid_max]
 
     if not candidates:
         return None

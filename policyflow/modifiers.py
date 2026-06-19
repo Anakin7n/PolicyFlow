@@ -230,8 +230,8 @@ class ModifierEngine:
         self.reasoning_detection = cfg.get("reasoning_detection", True)
         self.context_window_filter = cfg.get("context_window_filter", True)
         self.session_persistence = cfg.get("session_persistence", True)
-        self.strongest_model = cfg.get("strongest_model", "claude-opus-4-8")
-        self.reasoning_model = cfg.get("reasoning_model", "claude-opus-4-8")
+        self.strongest_model = cfg.get("strongest_model", "auto")
+        self.reasoning_model = cfg.get("reasoning_model", "auto")
         self.sessions = SessionStore(ttl=cfg.get("session_ttl", 1800))
 
     @staticmethod
@@ -267,6 +267,24 @@ class ModifierEngine:
             return best
         return available_models[0] if available_models else target
 
+    def _resolve_override(
+        self,
+        target: str,
+        specialty: str,
+        available_models: list[str],
+    ) -> str | None:
+        """Like _resolve_model, but returns None when no override is possible.
+
+        Used by the run() loop so a modifier can opt out (return no override)
+        instead of forcing the literal string ``"auto"`` downstream when the
+        user hasn't declared any providers.
+        """
+        if not available_models:
+            # No providers declared — auto-select has nothing to pick from.
+            # If user gave a specific model name, trust them; otherwise skip.
+            return None if target == "auto" else target
+        return self._resolve_model(target, specialty, available_models)
+
     def run(
         self,
         request: ChatCompletionRequest,
@@ -288,10 +306,9 @@ class ModifierEngine:
 
         # 1. Agent detection
         if self.agent_detection and detect_agent(request):
-            model = self._resolve_model(
-                self.strongest_model, "Agent工具调用", available,
-            ) if available else self.strongest_model
-            return ModifierResult(model, "agent_detected")
+            model = self._resolve_override(self.strongest_model, "Agent工具调用", available)
+            if model:
+                return ModifierResult(model, "agent_detected")
 
         # 2. Session persistence
         if self.session_persistence and session_id:
@@ -301,10 +318,9 @@ class ModifierEngine:
 
         # 3. Reasoning detection
         if self.reasoning_detection and detect_reasoning(prompt):
-            model = self._resolve_model(
-                self.reasoning_model, "逻辑分析", available,
-            ) if available else self.reasoning_model
-            return ModifierResult(model, "reasoning_detected")
+            model = self._resolve_override(self.reasoning_model, "逻辑分析", available)
+            if model:
+                return ModifierResult(model, "reasoning_detected")
 
         # 4. Context window filter
         if self.context_window_filter:
