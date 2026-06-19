@@ -1,0 +1,404 @@
+"""Anthropic Messages API <-> OpenAI Chat Completions adapter.
+
+Converts requests and responses so Claude Code (Anthropic-native client) can
+talk to PolicyFlow's OpenAI-based routing pipeline transparently.
+
+Protocols handled:
+  - Anthropic Messages:  POST /v1/messages  (request + response + streaming)
+  - OpenAI Chat Comps:   POST /v1/chat/completions
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+import uuid
+from typing import Any, AsyncIterator
+
+from .models import ChatCompletionRequest, Message as PFMessage
+
+logger = logging.getLogger(__name__)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Request conversion: Anthropic Messages → OpenAI Chat Completions
+# ═════════════════════════════════════════════════════════════════════
+
+def anthropic_to_chat_request(data: dict[str, Any]) -> ChatCompletionRequest:
+    """Convert an Anthropic Messages API request body to a ChatCompletionRequest.
+
+    The returned request goes straight into the existing PolicyFlow pipeline
+    (modifiers -> router -> proxy) — no other code changes needed.
+    """
+    messages = _convert_messages(data)
+    tools = _convert_tools(data.get("tools"))
+
+    return ChatCompletionRequest(
+        model=data.get("model", "claude-sonnet-4-6"),
+        messages=messages,
+        stream=data.get("stream", False),
+        temperature=data.get("temperature", 0.7),
+        top_p=data.get("top_p", 1.0),
+        max_tokens=data.get("max_tokens", 1024),
+        stop=data.get("stop_sequences"),
+        user=data.get("metadata", {}).get("user_id") if isinstance(data.get("metadata"), dict) else None,
+        extra={"tools": tools} if tools else {},
+    )
+
+
+def _convert_messages(data: dict[str, Any]) -> list[PFMessage]:
+    """Convert Anthropic messages array to OpenAI-format Message list."""
+    result: list[PFMessage] = []
+
+    # Anthropic's system is a top-level field; OpenAI prepends it as role="system"
+    system = data.get("system")
+    if system:
+        system_text = _extract_system_text(system)
+        if system_text:
+            result.append(PFMessage(role="system", content=system_text))
+
+    for msg in data.get("messages", []):
+        role = msg.get("role", "user")
+        content = msg.get("content")
+        if content is None:
+            continue
+
+        if isinstance(content, str):
+            result.append(PFMessage(role=role, content=content))
+        elif isinstance(content, list):
+            if role == "assistant":
+                result.append(_convert_assistant_blocks(content))
+            else:
+                result.extend(_convert_user_blocks(content))
+
+    return result
+
+
+def _extract_system_text(system: str | list[dict]) -> str:
+    """Anthropic system field: string or [{type:"text", text:"..."}, ...]."""
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return " ".join(
+            b.get("text", "") for b in system
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return ""
+
+
+def _convert_user_blocks(blocks: list[dict[str, Any]]) -> list[PFMessage]:
+    """Convert Anthropic content blocks from a user message.
+
+    User content can mix text, image, and tool_result blocks.  In OpenAI format
+    tool_results become separate ``role="tool"`` messages; text+image stay as
+    one ``role="user"`` message.
+    """
+    text_parts: list[str] = []
+    image_parts: list[dict[str, Any]] = []
+    tool_msgs: list[PFMessage] = []
+
+    for block in blocks:
+        btype = block.get("type", "")
+        if btype == "text":
+            text_parts.append(block.get("text", ""))
+        elif btype == "image":
+            image_parts.append(_convert_image_block(block))
+        elif btype == "tool_result":
+            tool_msgs.append(PFMessage(
+                role="tool",
+                tool_call_id=block.get("tool_use_id", ""),
+                content=_extract_tool_result_content(block.get("content", "")),
+            ))
+        elif btype in ("tool_use", "thinking"):
+            # tool_use blocks belong to assistant; thinking has no OpenAI eq.
+            pass
+
+    result: list[PFMessage] = []
+
+    if image_parts:
+        content_array: list[dict[str, Any]] = []
+        for t in text_parts:
+            content_array.append({"type": "text", "text": t})
+        content_array.extend(image_parts)
+        result.append(PFMessage(role="user", content=content_array))
+    elif text_parts:
+        result.append(PFMessage(role="user", content="\n".join(text_parts)))
+
+    result.extend(tool_msgs)
+    return result
+
+
+def _convert_assistant_blocks(blocks: list[dict[str, Any]]) -> PFMessage:
+    """Convert Anthropic content blocks from an assistant message.
+
+    Assistant content can mix text, tool_use, and thinking blocks.
+    Thinking blocks are dropped (no OpenAI equivalent).
+    """
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+
+    for block in blocks:
+        btype = block.get("type", "")
+        if btype == "text":
+            text_parts.append(block.get("text", ""))
+        elif btype == "tool_use":
+            tool_calls.append({
+                "id": block.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                "type": "function",
+                "function": {
+                    "name": block.get("name", ""),
+                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
+                },
+            })
+        elif btype == "thinking":
+            pass  # No OpenAI equivalent
+
+    msg = PFMessage(role="assistant")
+    if text_parts:
+        msg.content = "\n".join(text_parts)
+    if tool_calls:
+        msg.tool_calls = tool_calls
+    return msg
+
+
+def _convert_image_block(block: dict[str, Any]) -> dict[str, Any]:
+    """Anthropic image -> OpenAI image_url block."""
+    source = block.get("source", {})
+    media_type = source.get("media_type", "image/png")
+    data = source.get("data", "")
+    url = f"data:{media_type};base64,{data}"
+    return {"type": "image_url", "image_url": {"url": url, "detail": "auto"}}
+
+
+def _extract_tool_result_content(content: Any) -> str:
+    """tool_result content: string or list of text blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return str(content)
+
+
+def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """Anthropic tools -> OpenAI tools array.
+
+    Anthropic: {"name": "...", "description": "...", "input_schema": {...}}
+    OpenAI:    {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+    """
+    if not tools:
+        return None
+    result: list[dict[str, Any]] = []
+    for t in tools:
+        result.append({
+            "type": "function",
+            "function": {
+                "name": t.get("name", ""),
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema", {}),
+            },
+        })
+    return result
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Response conversion: OpenAI Chat Completions → Anthropic Messages
+# ═════════════════════════════════════════════════════════════════════
+
+def openai_to_anthropic_response(
+    openai_data: dict[str, Any],
+    routed_model: str,
+) -> dict[str, Any]:
+    """Convert an OpenAI ChatCompletionResponse (dict) to Anthropic Messages format."""
+    choice = (openai_data.get("choices") or [{}])[0]
+    message = choice.get("message", {})
+    finish_reason = choice.get("finish_reason", "stop")
+    usage = openai_data.get("usage", {})
+
+    # Convert content + tool_calls to Anthropic content blocks
+    content_blocks: list[dict[str, Any]] = []
+
+    # Text content
+    text = message.get("content") or ""
+    if text:
+        content_blocks.append({"type": "text", "text": text})
+
+    # Tool calls -> tool_use blocks
+    for tc in message.get("tool_calls") or []:
+        fn = tc.get("function", {})
+        try:
+            inp = json.loads(fn.get("arguments", "{}"))
+        except json.JSONDecodeError:
+            inp = {}
+        content_blocks.append({
+            "type": "tool_use",
+            "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:12]}"),
+            "name": fn.get("name", ""),
+            "input": inp,
+        })
+
+    return {
+        "id": f"msg_{uuid.uuid4().hex[:12]}",
+        "type": "message",
+        "role": "assistant",
+        "model": routed_model,
+        "content": content_blocks,
+        "stop_reason": _map_finish_reason(finish_reason),
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+        },
+    }
+
+
+def _map_finish_reason(reason: str) -> str:
+    return {
+        "stop": "end_turn",
+        "length": "max_tokens",
+        "tool_calls": "tool_use",
+        "content_filter": "end_turn",
+    }.get(reason, "end_turn")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Streaming conversion: OpenAI SSE → Anthropic SSE
+# ═════════════════════════════════════════════════════════════════════
+
+class AnthropicStreamConverter:
+    """Stateful converter: OpenAI SSE chunks → Anthropic SSE event stream.
+
+    Usage::
+
+        converter = AnthropicStreamConverter(routed_model)
+        async for openai_chunk in proxy.chat_completion_stream(request):
+            for event in converter.feed(openai_chunk):
+                yield event  # bytes ready to send over HTTP SSE
+        for event in converter.flush():
+            yield event
+    """
+
+    def __init__(self, routed_model: str) -> None:
+        self.routed_model = routed_model
+        self.msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+
+        # State
+        self._content_index = -1
+        self._has_started = False
+        self._finish_reason = "end_turn"
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._stop_emitted = False
+
+    def feed(self, chunk_str: str) -> list[bytes]:
+        """Feed one OpenAI SSE data line, return Anthropic SSE events to emit."""
+        events: list[bytes] = []
+
+        # OpenAI SSE: "data: {...}\n\n"
+        line = chunk_str.strip()
+        if not line or line == "[DONE]":
+            return events
+        if line.startswith("data: "):
+            line = line[6:]
+
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return events
+
+        # Extract from the chunk (OpenAI streaming format)
+        choice = (data.get("choices") or [{}])[0]
+        delta = choice.get("delta", {})
+        finish = choice.get("finish_reason")
+        usage = data.get("usage")
+
+        # Track usage from the last chunk
+        if usage:
+            self._input_tokens = usage.get("prompt_tokens", 0)
+            self._output_tokens = usage.get("completion_tokens", 0)
+
+        # Start the message on first chunk
+        if not self._has_started:
+            self._has_started = True
+            start_event = _sse("message_start", {
+                "type": "message_start",
+                "message": {
+                    "id": self.msg_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": self.routed_model,
+                    "content": [],
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            })
+            events.append(start_event)
+
+        # Handle text content
+        text = delta.get("content")
+        tool_calls = delta.get("tool_calls")
+
+        if text:
+            # Start a text content block if this is the first text chunk
+            if self._content_index < 0:
+                self._content_index += 1
+                block_start = _sse("content_block_start", {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                })
+                events.append(block_start)
+
+            delta_event = _sse("content_block_delta", {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": text},
+            })
+            events.append(delta_event)
+
+        if tool_calls:
+            # Simple: just accumulate and emit in flush. For now, skip
+            # streaming tool_calls — the full tool_use appears in the
+            # non-streaming response path anyway.
+            pass
+
+        if finish:
+            self._finish_reason = _map_finish_reason(finish)
+
+        return events
+
+    def flush(self) -> list[bytes]:
+        """Emit remaining events after all chunks consumed."""
+        if self._stop_emitted:
+            return []
+        events: list[bytes] = []
+
+        # Close the content block if one was opened
+        if self._content_index >= 0:
+            events.append(_sse("content_block_stop", {
+                "type": "content_block_stop",
+                "index": 0,
+            }))
+
+        # Message delta with stop reason + usage
+        events.append(_sse("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": self._finish_reason, "stop_sequence": None},
+            "usage": {"output_tokens": self._output_tokens},
+        }))
+
+        # Stop
+        events.append(_sse("message_stop", {
+            "type": "message_stop",
+        }))
+
+        self._stop_emitted = True
+        return events
+
+
+def _sse(event_type: str, data: dict[str, Any]) -> bytes:
+    """Encode one Anthropic SSE event as bytes."""
+    payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event_type}\ndata: {payload}\n\n".encode("utf-8")

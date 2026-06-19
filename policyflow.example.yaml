@@ -35,9 +35,9 @@ providers:
     base_url: https://open.bigmodel.cn/api/paas/v4
     api_key: "${ZHIPU_API_KEY}"
     models:
-      - "glm-5.2"
       - "glm-5"
       - "glm-5.1"
+      # glm-5.2 在 volc-coding 段也声明了，按 yaml 顺序 volc-coding 优先
 
   kimi:
     base_url: https://api.moonshot.cn/v1
@@ -53,6 +53,17 @@ providers:
       # 去 console.volcengine.com → ARK → 模型推理 → 创建接入点 → 复制 Endpoint ID
       - "doubao-1.6"
       - "doubao-seed-2.0-lite"
+
+  # 火山 Coding Plan（Agent 订阅计划，可调用多厂商模型）
+  # 排在 glm 前面 → 相同的 glm-5.2 优先走 Coding Plan；没配 key 或挂了自动 fallback 到 glm
+  # 没有订阅 Coding Plan 的删掉这个 provider 即可。
+  volc-coding:
+    base_url: https://ark.cn-beijing.volces.com/api/coding/v3
+    api_key: "${VOLC_CODING_KEY}"
+    models:
+      - "glm-5.2"
+      - "deepseek-r1"
+      - "deepseek-v4-pro"
 
   ernie:
     base_url: https://qianfan.baidubce.com/v2
@@ -127,15 +138,22 @@ policies_hybrid:
       has_image: true
     route_to: "gpt-4o"
 
-  - name: "代码生成与审查"
+  - name: "代码生成"
     match:
       keywords: [
         "写代码", "写个", "写一段", "写一个函数", "写一个类",
-        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
-        "重构", "refactor", "单元测试", "写测试", "test case",
         "SQL查询", "SQL语句", "API接口", "REST", "算法实现",
         "正则", "regex", "脚本", "shell", "bash",
-        "报错", "异常", "stacktrace", "如何实现"
+        "如何实现"
+      ]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "代码审查与调试"
+    match:
+      keywords: [
+        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
+        "重构", "refactor", "单元测试", "写测试", "test case",
+        "报错", "异常", "stacktrace"
       ]
     route_to: "claude-sonnet-4-6"
 
@@ -177,14 +195,38 @@ policies_hybrid:
     match:
       keywords: [
         "数学证明", "证明", "推导", "求证",
-        "架构设计", "系统设计", "技术方案", "技术选型",
         "策略分析", "战略", "决策", "方案对比", "tradeoff", "权衡",
-        "安全审计", "安全分析", "威胁建模",
-        "性能优化", "性能分析", "瓶颈", "调优",
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
     route_to: "claude-opus-4-8"
+
+  - name: "系统架构与设计"
+    match:
+      keywords: [
+        "架构设计", "系统设计", "技术方案", "技术选型",
+        "微服务", "高并发", "分布式", "数据库设计"
+      ]
+      min_input_tokens: 200
+    route_to: "claude-opus-4-8"
+
+  - name: "安全审计与分析"
+    match:
+      keywords: [
+        "安全审计", "安全分析", "威胁建模", "漏洞",
+        "渗透", "加密", "鉴权", "授权", "OAuth"
+      ]
+      min_input_tokens: 150
+    route_to: "claude-opus-4-8"
+
+  - name: "性能分析与调优"
+    match:
+      keywords: [
+        "性能优化", "性能分析", "瓶颈", "调优",
+        "加速", "慢查询", "优化SQL", "高延迟"
+      ]
+      min_input_tokens: 150
+    route_to: "claude-sonnet-4-6"
 
   - name: "知识问答与学习"
     match:
@@ -216,24 +258,29 @@ policies_hybrid:
     route_to: "claude-sonnet-4-6"
 
 # ── 算法全托管（capability 模式使用）───────────────────────────────
-# 全部声明任务类型，系统帮你选模型。不写 route_to。
+# 不写 route_to — 根据识别出的任务类型，从所有可用模型里算分选最优。
 policies_capability:
   - name: "图片理解"
     match:
       has_image: true
-    specialty: 图片理解
 
-  - name: "代码生成与审查"
+  - name: "代码生成"
     match:
       keywords: [
         "写代码", "写个", "写一段", "写一个函数", "写一个类",
-        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
-        "重构", "refactor", "单元测试", "写测试", "test case",
         "SQL查询", "SQL语句", "API接口", "REST", "算法实现",
         "正则", "regex", "脚本", "shell", "bash",
-        "报错", "异常", "stacktrace", "如何实现"
+        "如何实现"
       ]
-    specialty: 代码生成
+    max_cost_tier: mid
+
+  - name: "代码审查与调试"
+    match:
+      keywords: [
+        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
+        "重构", "refactor", "单元测试", "写测试", "test case",
+        "报错", "异常", "stacktrace"
+      ]
     max_cost_tier: mid
 
   - name: "数据分析与处理"
@@ -243,7 +290,6 @@ policies_capability:
         "统计", "趋势", "异常值", "数据可视化", "图表",
         "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
       ]
-    specialty: 逻辑分析
     max_cost_tier: mid
 
   - name: "文本创作与写作"
@@ -256,7 +302,6 @@ policies_capability:
         "写诗", "写歌词", "故事", "小说", "剧本",
         "扩写", "续写", "改写"
       ]
-    specialty: 文本创作
 
   - name: "翻译、摘要、格式化"
     match:
@@ -268,21 +313,40 @@ policies_capability:
         "润色", "polish"
       ]
       max_input_tokens: 800
-    specialty: 翻译校对
     cascade: true
 
   - name: "复杂推理与分析"
     match:
       keywords: [
         "数学证明", "证明", "推导", "求证",
-        "架构设计", "系统设计", "技术方案", "技术选型",
         "策略分析", "战略", "决策", "方案对比", "tradeoff", "权衡",
-        "安全审计", "安全分析", "威胁建模",
-        "性能优化", "性能分析", "瓶颈", "调优",
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
-    specialty: 逻辑分析
+
+  - name: "系统架构与设计"
+    match:
+      keywords: [
+        "架构设计", "系统设计", "技术方案", "技术选型",
+        "微服务", "高并发", "分布式", "数据库设计"
+      ]
+      min_input_tokens: 200
+
+  - name: "安全审计与分析"
+    match:
+      keywords: [
+        "安全审计", "安全分析", "威胁建模", "漏洞",
+        "渗透", "加密", "鉴权", "授权", "OAuth"
+      ]
+      min_input_tokens: 150
+
+  - name: "性能分析与调优"
+    match:
+      keywords: [
+        "性能优化", "性能分析", "瓶颈", "调优",
+        "加速", "慢查询", "优化SQL", "高延迟"
+      ]
+      min_input_tokens: 150
 
   - name: "知识问答与学习"
     match:
@@ -294,7 +358,6 @@ policies_capability:
         "讲讲", "介绍下", "科普", "解读"
       ]
       min_input_tokens: 60
-    specialty: 通用问答
     max_cost_tier: mid
 
   - name: "日常闲聊与简单问答"
@@ -307,13 +370,11 @@ policies_capability:
         "什么是", "怎么样", "好吗"
       ]
       max_input_tokens: 150
-    specialty: 通用问答
     max_cost_tier: cheap          # 限定只在便宜档里挑
 
   - name: "默认"
     match:
       default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
-    specialty: 通用问答
 
 # ── 全指定（explicit 模式使用）────────────────────────────────────
 # 全部写死模型，系统不插手。
@@ -323,15 +384,22 @@ policies_explicit:
       has_image: true
     route_to: "gpt-4o"
 
-  - name: "代码生成与审查"
+  - name: "代码生成"
     match:
       keywords: [
         "写代码", "写个", "写一段", "写一个函数", "写一个类",
-        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
-        "重构", "refactor", "单元测试", "写测试", "test case",
         "SQL查询", "SQL语句", "API接口", "REST", "算法实现",
         "正则", "regex", "脚本", "shell", "bash",
-        "报错", "异常", "stacktrace", "如何实现"
+        "如何实现"
+      ]
+    route_to: "claude-sonnet-4-6"
+
+  - name: "代码审查与调试"
+    match:
+      keywords: [
+        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
+        "重构", "refactor", "单元测试", "写测试", "test case",
+        "报错", "异常", "stacktrace"
       ]
     route_to: "claude-sonnet-4-6"
 
@@ -373,14 +441,38 @@ policies_explicit:
     match:
       keywords: [
         "数学证明", "证明", "推导", "求证",
-        "架构设计", "系统设计", "技术方案", "技术选型",
         "策略分析", "战略", "决策", "方案对比", "tradeoff", "权衡",
-        "安全审计", "安全分析", "威胁建模",
-        "性能优化", "性能分析", "瓶颈", "调优",
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
     route_to: "claude-opus-4-8"
+
+  - name: "系统架构与设计"
+    match:
+      keywords: [
+        "架构设计", "系统设计", "技术方案", "技术选型",
+        "微服务", "高并发", "分布式", "数据库设计"
+      ]
+      min_input_tokens: 200
+    route_to: "claude-opus-4-8"
+
+  - name: "安全审计与分析"
+    match:
+      keywords: [
+        "安全审计", "安全分析", "威胁建模", "漏洞",
+        "渗透", "加密", "鉴权", "授权", "OAuth"
+      ]
+      min_input_tokens: 150
+    route_to: "claude-opus-4-8"
+
+  - name: "性能分析与调优"
+    match:
+      keywords: [
+        "性能优化", "性能分析", "瓶颈", "调优",
+        "加速", "慢查询", "优化SQL", "高延迟"
+      ]
+      min_input_tokens: 150
+    route_to: "claude-sonnet-4-6"
 
   - name: "知识问答与学习"
     match:

@@ -1,11 +1,12 @@
-# PolicyFlow 示例配置 — 开发场景（编程为主）
+# PolicyFlow 示例配置 — 混合模式（能力选模 + 手工锁定）
 #
-# 适用场景: 个人/团队开发，大量代码生成和 debug
-# 核心思路: 代码走代码模型，复杂设计走推理模型，其余走便宜模型
+# 适用场景: 想省钱但关键任务不敢交给系统乱选
+# 核心思路: 代码/推理等重要策略自己锁死模型，翻译/闲聊/文档交给系统
+#   从所有可用模型里自动挑性价比最优的
 #
-# 用法: cp examples/policyflow-dev.yaml policyflow.yaml
+# 用法: cp examples/policyflow-hybrid.yaml policyflow.yaml
 
-routing_mode: explicit
+routing_mode: hybrid
 
 # ── Providers ────────────────────────────────────────────────────────
 providers:
@@ -18,10 +19,26 @@ providers:
       - "deepseek-v3"
       - "deepseek-r1"
 
+  qwen:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: "${DASHSCOPE_API_KEY}"
+    models:
+      - "qwen-max"
+      - "qwen-plus"
+      - "qwen-flash"
+
+  glm:
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key: "${ZHIPU_API_KEY}"
+    models:
+      - "glm-5.2"
+      - "glm-5"
+
   anthropic:
     base_url: https://api.anthropic.com
     api_key: "${ANTHROPIC_API_KEY}"
     models:
+      - "claude-haiku-4-5"
       - "claude-sonnet-4-6"
       - "claude-opus-4-8"
 
@@ -46,67 +63,88 @@ cost_tiers:
   mid_max:   5.0
 
 # ── Policies (hybrid) ─────────────────────────────────────────────────
+# 重要策略：route_to 锁死（你说的算）
+# 不写 route_to 的：系统自动按任务类型选最优模型
 policies_hybrid:
   - name: "代码生成"
     match:
       keywords: [
-        "写代码", "写个", "写一段", "写一个函数", "写一个类",
-        "SQL查询", "SQL语句", "API接口", "REST", "算法实现",
-        "正则", "regex", "脚本", "shell", "bash",
-        "如何实现"
+        "写代码", "写个", "debug", "调试",
+        "SQL查询", "API接口", "算法实现",
+        "报错", "如何实现"
       ]
-    route_to: "deepseek-v4-pro"
+    route_to: "claude-sonnet-4-6"         # ← 手工锁死，代码质量不能省
 
   - name: "代码审查与调试"
     match:
       keywords: [
-        "debug", "调试", "修bug", "fix bug", "代码审查", "review代码",
-        "重构", "refactor", "单元测试", "写测试", "test case",
-        "报错", "异常", "stacktrace"
+        "代码审查", "review代码", "修bug", "fix bug",
+        "重构", "refactor", "单元测试", "写测试",
+        "异常", "stacktrace"
       ]
-    route_to: "deepseek-v4-pro"
+    route_to: "claude-sonnet-4-6"         # ← 手工锁死
 
-  - name: "复杂架构与系统设计"
+  - name: "复杂推理与分析"
     match:
       keywords: [
         "架构设计", "系统设计", "技术方案", "技术选型",
         "策略分析", "方案对比", "tradeoff", "权衡",
-        "性能优化", "性能分析", "瓶颈", "调优",
-        "安全审计", "安全分析",
-        "数学证明", "推导", "求证"
+        "数学证明", "推导", "求证",
+        "安全审计", "性能优化", "瓶颈"
       ]
       min_input_tokens: 200
-    route_to: "claude-opus-4-8"
-
-  - name: "数据分析与处理"
-    match:
-      keywords: [
-        "分析数据", "数据分析", "Excel", "CSV", "表格",
-        "统计", "趋势", "异常值", "数据可视化", "图表",
-        "对比数据", "groupby", "透视", "DataFrame", "pandas"
-      ]
-    route_to: "claude-sonnet-4-6"
+    route_to: "claude-opus-4-8"           # ← 手工锁死，推理不能省
 
   - name: "图片理解"
     match:
       has_image: true
-    route_to: "claude-sonnet-4-6"
+    route_to: "claude-sonnet-4-6"         # ← 手工锁死
+
+  - name: "翻译、摘要、格式化"
+    match:
+      keywords: [
+        "翻译", "translate", "摘要", "总结", "概括",
+        "格式化", "排版", "纠错", "校对", "润色"
+      ]
+      max_input_tokens: 800
+    # 没写 route_to → 系统自动识别为翻译校对，从可用模型里挑性价比最优的
+
+  - name: "文本创作与写作"
+    match:
+      keywords: [
+        "写一封", "写一篇", "写个文案", "起标题",
+        "公众号", "邮件", "简历",
+        "产品介绍", "广告语",
+        "写诗", "故事", "小说"
+      ]
+    max_cost_tier: mid        # 自动识别为文本创作，选 mid 档
+
+  - name: "知识问答与学习"
+    match:
+      keywords: [
+        "为什么", "原理", "工作原理",
+        "区别", "差异",
+        "怎么学", "如何学", "怎么入门",
+        "讲讲", "介绍下", "科普"
+      ]
+      min_input_tokens: 60
+    max_cost_tier: mid        # 自动识别为通用问答，选 mid 档
 
   - name: "日常闲聊与简单问答"
     match:
       keywords: [
         "你好", "hi", "hello", "在吗",
         "谢谢", "感谢",
-        "你是谁", "你叫什么", "你能做什么", "你会什么",
+        "你是谁", "你能做什么",
         "什么是", "怎么样"
       ]
       max_input_tokens: 150
-    route_to: "deepseek-v4-flash"
+    max_cost_tier: cheap      # 自动识别为通用问答，限制 cheap 档省钱
 
   - name: "默认"
     match:
-      default: true               # 兜底：前面规则都没命中走这里
-    route_to: "deepseek-v4-pro"
+      default: true
+    route_to: "deepseek-v4-pro"           # ← 兜底锁死，别让系统乱选
 
 # ── Cascade ───────────────────────────────────────────────────────────
 cascade:
@@ -122,11 +160,11 @@ cascade:
 modifiers:
   agent_detection: true
   reasoning_detection: true
-  context_window_filter: false
+  context_window_filter: true
   session_persistence: true
   session_ttl: 1800
-  strongest_model: "claude-opus-4-8"
-  reasoning_model: "deepseek-r1"
+  strongest_model: "auto"
+  reasoning_model: "auto"
 
 # ── Optimizer ─────────────────────────────────────────────────────────
 optimizer:

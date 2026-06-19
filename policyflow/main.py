@@ -13,6 +13,11 @@ from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import db
+from .anthropic_adapter import (
+    AnthropicStreamConverter,
+    anthropic_to_chat_request,
+    openai_to_anthropic_response,
+)
 from .db import hash_prompt
 from .cascade import CascadeConfig, CascadeValidator
 from .config import Config
@@ -85,6 +90,158 @@ app = FastAPI(
 
 
 # ── OpenAI-compatible endpoints ──────────────────────────────────────
+
+@app.post("/v1/messages")
+async def anthropic_messages(
+    anthropic_body: dict[str, Any],
+    fastapi_request: FastAPIRequest,
+):
+    """Anthropic Messages API endpoint — converts to OpenAI, routes, converts back.
+
+    Supports both streaming (text only) and non-streaming.  Claude Code and
+    other Anthropic-native clients point here::
+
+        anthropic_base_url = "http://localhost:8000/v1"
+    """
+    router: Router = app.state.router
+    proxy: UpstreamProxy = app.state.proxy
+    cascade: CascadeValidator = app.state.cascade
+    modifiers: ModifierEngine = app.state.modifiers
+    config: Config = app.state.config
+
+    t_start = time.time()
+    stream = anthropic_body.get("stream", False)
+    original_model = anthropic_body.get("model", "claude-sonnet-4-6")
+
+    # ── 1. Anthropic → OpenAI request ──────────────────────────
+    openai_req = anthropic_to_chat_request(anthropic_body)
+
+    # Extract prompt for logging (same logic as chat_completions)
+    last_msg = openai_req.messages[-1].content if openai_req.messages else None
+    if last_msg is None:
+        prompt_text = ""
+    elif isinstance(last_msg, str):
+        prompt_text = last_msg
+    else:
+        prompt_text = str(last_msg)
+    prompt_hash_val = hash_prompt(prompt_text) if prompt_text else ""
+    prompt_preview_val = prompt_text[:500] if config.log_prompt_preview else ""
+    judge_reason_val = ""
+    session_id = fastapi_request.headers.get("X-Session-ID")
+    user = fastapi_request.headers.get("X-User", "default")
+    response = None
+    cascade_attempts = 0
+    success = True
+
+    # ── 2. Modifiers ───────────────────────────────────────────
+    available_models = list(proxy.config._model_provider.keys())
+    modifier_result = modifiers.run(openai_req, session_id, available_models)
+
+    if modifier_result.has_override:
+        openai_req.model = modifier_result.override_model
+        route_method = modifier_result.reason
+        route_score = 1.0
+        route_policy_name = modifier_result.reason
+    else:
+        decision = await router.route(openai_req)
+        openai_req.model = decision.target_model
+        route_method = decision.method
+        route_score = decision.score
+        route_policy_name = decision.policy.name if decision.policy else "none"
+
+    logger.info(
+        "Route [anthropic]: %s → %s  [%s, %.3f]",
+        original_model, openai_req.model, route_method, route_score,
+    )
+
+    modifiers.persist_session(session_id, openai_req.model)
+
+    # ── 3. Forward (non-streaming only for cascade support) ────
+    if stream:
+        # Streaming: skip cascade, stream Anthropic SSE
+        try:
+            provider_name = proxy.config.get_model_provider(openai_req.model)
+            converter = AnthropicStreamConverter(openai_req.model)
+            sse_stream = _anthropic_stream_wrapper(
+                proxy, openai_req, provider_name, converter,
+            )
+            return StreamingResponse(
+                sse_stream,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-PolicyFlow-Policy": route_policy_name,
+                    "X-PolicyFlow-Method": route_method,
+                    "X-PolicyFlow-Score": f"{route_score:.3f}",
+                    "X-PolicyFlow-Model": openai_req.model,
+                },
+            )
+        except Exception:
+            success = False
+            raise
+    else:
+        try:
+            response, cascade_attempts, judge_reason_val = await _forward_with_cascade(
+                proxy, cascade, openai_req,
+            )
+        except HTTPException:
+            success = False
+            raise
+        except Exception:
+            success = False
+            raise
+        finally:
+            duration_ms = int((time.time() - t_start) * 1000)
+            _log_to_db(
+                user=user,
+                original_model=original_model,
+                routed_model=openai_req.model,
+                policy_name=route_policy_name,
+                method=route_method,
+                score=route_score,
+                response=response,
+                cascade_attempts=cascade_attempts,
+                duration_ms=duration_ms,
+                success=success,
+                prompt_hash=prompt_hash_val,
+                prompt_preview=prompt_preview_val,
+                judge_reason=judge_reason_val,
+            )
+
+        # Convert OpenAI response → Anthropic format
+        anthropic_resp = openai_to_anthropic_response(
+            response.model_dump(exclude_none=True),
+            routed_model=openai_req.model,
+        )
+        return JSONResponse(
+            content=anthropic_resp,
+            headers={
+                "X-PolicyFlow-Policy": route_policy_name,
+                "X-PolicyFlow-Method": route_method,
+                "X-PolicyFlow-Score": f"{route_score:.3f}",
+                "X-PolicyFlow-Model": openai_req.model,
+            },
+        )
+
+
+async def _anthropic_stream_wrapper(
+    proxy: UpstreamProxy,
+    request: ChatCompletionRequest,
+    provider_name: str | None,
+    converter: AnthropicStreamConverter,
+) -> AsyncIterator[bytes]:
+    """Bridge: OpenAI SSE stream → Anthropic SSE events."""
+    async for chunk in proxy.chat_completion_stream(request, provider_name=provider_name):
+        if isinstance(chunk, str):
+            for event in converter.feed(chunk):
+                yield event
+        elif isinstance(chunk, bytes):
+            for event in converter.feed(chunk.decode("utf-8")):
+                yield event
+    for event in converter.flush():
+        yield event
+
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
@@ -257,8 +414,7 @@ async def _forward_with_cascade(
     # If cascade is completely disabled, just forward once and return
     if not cascade.config.enabled:
         try:
-            provider_name = proxy.config.get_model_provider(request.model)
-            response = await proxy.chat_completion(request, provider_name=provider_name)
+            response, provider_name = await proxy.chat_completion_with_fallback(request)
         except ProxyError as e:
             raise HTTPException(status_code=502, detail=str(e))
         return response, 0, ""
@@ -267,8 +423,7 @@ async def _forward_with_cascade(
         current_model = request.model
 
         try:
-            provider_name = proxy.config.get_model_provider(request.model)
-            response = await proxy.chat_completion(request, provider_name=provider_name)
+            response, provider_name = await proxy.chat_completion_with_fallback(request)
         except ProxyError as e:
             logger.warning("Upstream error (attempt %d): %s", attempt + 1, e)
             next_model = cascade.get_next_model(current_model)

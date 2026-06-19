@@ -1,7 +1,11 @@
-# PolicyFlow 示例配置 — 中文场景（团队办公）
+# PolicyFlow 示例配置 — 中文办公场景（翻译/文档为主）
 #
-# 适用场景: 团队日常办公，大量翻译/摘要/格式化需求
-# 核心思路: 简单任务走国产便宜模型，复杂任务走高端模型
+# 适用场景: 国内办公，大量翻译、摘要、文档处理、日常问答
+# 核心思路: 全用国产模型，翻译/闲聊走 flash 省钱，专业写作走 plus/pro
+#
+# 用法: cp examples/policyflow-zh.yaml policyflow.yaml
+
+routing_mode: explicit
 
 # ── Providers ────────────────────────────────────────────────────────
 providers:
@@ -11,77 +15,134 @@ providers:
     models:
       - "deepseek-v4-flash"
       - "deepseek-v4-pro"
-
-  anthropic:
-    base_url: https://api.anthropic.com
-    api_key: "${ANTHROPIC_API_KEY}"
-    models:
-      - "claude-sonnet-4-6"
-      - "claude-opus-4-8"
+      - "deepseek-r1"
 
   qwen:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key: "${DASHSCOPE_API_KEY}"
     models:
       - "qwen-max"
+      - "qwen-plus"
       - "qwen-flash"
 
+  glm:
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key: "${ZHIPU_API_KEY}"
+    models:
+      - "glm-5.2"
+      - "glm-5"
+
+# ── Default upstream ──────────────────────────────────────────────────
 upstream:
   base_url: https://api.deepseek.com
   api_key: "${DEEPSEEK_API_KEY}"
   timeout: 60
 
+# ── Embedding ─────────────────────────────────────────────────────────
 embedding:
-  model: text-embedding-3-small
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key: "${DASHSCOPE_API_KEY}"
+  model: text-embedding-v4
   similarity_threshold: 0.75
+  verify_threshold: 0.5
+  timeout: 30
 
-policies:
-  # 翻译、摘要、润色 → 最便宜
+# ── Cost tiers ────────────────────────────────────────────────────────
+cost_tiers:
+  cheap_max: 1.0
+  mid_max:   5.0
+
+# ── Policies (hybrid) ─────────────────────────────────────────────────
+policies_hybrid:
   - name: "翻译、摘要、格式化"
     match:
-      keywords: ["翻译", "摘要", "改写", "格式化", "纠错", "扩写", "润色", "总结"]
+      keywords: [
+        "翻译", "translate", "译成", "中译英", "英译中",
+        "摘要", "总结", "summarize", "概括", "提炼要点",
+        "格式化", "排版", "整理格式",
+        "纠错", "校对", "改错别字", "修改语法",
+        "润色", "polish"
+      ]
       max_input_tokens: 800
     route_to: "qwen-flash"
     cascade: true
 
-  # 通用办公 → 性价比
-  - name: "通用问答"
+  - name: "文本创作与写作"
     match:
-      keywords: ["怎么", "什么是", "如何", "解释", "推荐", "帮我"]
-    route_to: "deepseek-v4-flash"
+      keywords: [
+        "写一封", "写一篇", "写个文案", "起标题",
+        "公众号", "微博", "小红书",
+        "邮件", "求职信", "简历",
+        "产品介绍", "广告语",
+        "写诗", "故事", "小说",
+        "扩写", "续写", "改写"
+      ]
+    route_to: "qwen-plus"
 
-  # 代码相关 → 代码模型
-  - name: "代码生成与审查"
+  - name: "知识问答与学习"
     match:
-      keywords: ["写代码", "debug", "代码审查", "重构", "单元测试",
-                 "SQL", "API", "算法", "bug"]
-    route_to: "deepseek-v4-pro"
+      keywords: [
+        "为什么", "原理", "工作原理", "运作机制",
+        "原因", "由来", "起源", "历史",
+        "区别", "差异",
+        "怎么学", "如何学", "怎么入门", "入门",
+        "讲讲", "介绍下", "科普", "解读"
+      ]
+      min_input_tokens: 60
+    route_to: "qwen-max"
 
-  # 复杂分析 → 最强模型
-  - name: "复杂分析与推理"
+  - name: "复杂分析与决策"
     match:
-      keywords: ["架构设计", "技术方案", "安全审计", "性能优化",
-                 "系统设计", "数学证明", "策略分析"]
-    route_to: "claude-sonnet-4-6"
+      keywords: [
+        "策略分析", "方案对比", "tradeoff", "权衡",
+        "战略", "决策", "复盘",
+        "深度分析", "评估"
+      ]
+      min_input_tokens: 200
+    route_to: "deepseek-r1"
 
-  # 默认
+  - name: "日常闲聊与简单问答"
+    match:
+      keywords: [
+        "你好", "hi", "hello", "在吗",
+        "谢谢", "感谢",
+        "晚安", "早上好",
+        "你是谁", "你能做什么",
+        "什么是", "怎么样", "好吗"
+      ]
+      max_input_tokens: 150
+    route_to: "qwen-flash"
+
   - name: "默认"
     match:
       default: true               # 兜底：前面规则都没命中走这里
-    route_to: "deepseek-v4-flash"
+    route_to: "deepseek-v4-pro"
 
+# ── Cascade ───────────────────────────────────────────────────────────
 cascade:
   enabled: true
-  max_retries: 2
+  verifier: rule_only
   escalation_chain:
     - "qwen-flash"
     - "deepseek-v4-flash"
-    - "claude-sonnet-4-6"
+    - "deepseek-v4-pro"
+  max_retries: 2
 
+# ── Modifiers ─────────────────────────────────────────────────────────
 modifiers:
-  agent_detection: true
+  agent_detection: false
   reasoning_detection: true
-  context_window_filter: true
+  context_window_filter: false
   session_persistence: true
-  strongest_model: "claude-opus-4-8"
-  reasoning_model: "claude-sonnet-4-6"
+  session_ttl: 1800
+  reasoning_model: "deepseek-r1"
+
+# ── Optimizer ─────────────────────────────────────────────────────────
+optimizer:
+  enabled: true
+  model: qwen-flash
+  max_suggestions: 5
+
+# ── Logging ───────────────────────────────────────────────────────────
+logging:
+  log_prompt_preview: false

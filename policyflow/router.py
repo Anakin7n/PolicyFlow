@@ -201,14 +201,16 @@ class RouteDecision:
         self.method = method
         self.score = score
         if policy and use_capability and available_models:
+            from .policy import PolicyEngine
+            task = PolicyEngine._infer_specialty(policy)
             best = select_best_model(
-                policy.specialty, available_models,
+                task, available_models,
                 cost_tier=policy.max_cost_tier,
                 cost_tier_thresholds=cost_tier_thresholds,
             )
             self.target_model = best or policy.route_to or original_model
             if best:
-                self.method = f"capability({policy.specialty})"
+                self.method = f"capability({task})"
         else:
             self.target_model = policy.route_to if policy else original_model
 

@@ -34,7 +34,8 @@ class Config:
     def __init__(self, path: str = "policyflow.yaml") -> None:
         self.path = Path(path)
         self.data: dict = self._load()
-        self._model_provider: dict[str, str] = self._build_model_provider_map()
+        self._model_provider: dict[str, list[str]] = self._build_model_provider_map()
+        # model_id → [provider_name, ...]  ordered by yaml appearance (first = highest priority)
 
     def _load(self) -> dict:
         # Try the user's config first, then the example template
@@ -79,23 +80,39 @@ class Config:
 
         return data
 
-    def _build_model_provider_map(self) -> dict[str, str]:
-        """Build a reverse index: model_id → provider_name.
+    def _build_model_provider_map(self) -> dict[str, list[str]]:
+        """Build a reverse index: model_id → [provider_name, ...].
+
+        Provider order is yaml appearance — first listed provider for a model
+        is tried first. If a provider fails with a transient error (quota
+        exhausted, rate-limited, server down), the next provider in this
+        list is tried automatically.
 
         providers is a dict like:
             { "deepseek": { base_url: ..., models: [...] }, "anthropic": {...} }
         """
-        model_map: dict[str, str] = {}
+        model_map: dict[str, list[str]] = {}
         providers = self.data.get("providers", {})
         if isinstance(providers, dict):
             for name, cfg in providers.items():
                 for model in cfg.get("models", []):
-                    model_map[model] = name
+                    if model not in model_map:
+                        model_map[model] = []
+                    model_map[model].append(name)
         return model_map
 
     def get_model_provider(self, model_id: str) -> str | None:
-        """Return the provider name for a model, or None if using default upstream."""
-        return self._model_provider.get(model_id)
+        """Return the primary (first-listed) provider for a model, or None."""
+        providers = self.get_model_providers(model_id)
+        return providers[0] if providers else None
+
+    def get_model_providers(self, model_id: str) -> list[str]:
+        """Return all providers for a model, in yaml-appearance order.
+
+        The first provider is tried first; on transient failure, the next
+        provider in this list is used automatically (see UpstreamProxy).
+        """
+        return self._model_provider.get(model_id, [])
 
     def get_provider_config(self, provider_name: str) -> dict:
         """Return {base_url, api_key, timeout} for a provider."""

@@ -17,6 +17,20 @@ from .models import ChatCompletionRequest, ChatCompletionResponse
 class ProxyError(Exception):
     """Raised when the upstream returns an error."""
 
+    def __init__(self, message: str, status_code: int = 0) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+    @property
+    def retryable(self) -> bool:
+        """Whether this error is worth retrying on another provider.
+
+        Transient errors (quota, rate-limit, server-down, connection) are
+        retryable.  Permanent errors (bad request, auth) are not — there is
+        no point trying another provider with the same broken payload.
+        """
+        return self.status_code in (402, 429, 500, 502, 503, 504) or self.status_code == 0
+
 
 class UpstreamProxy:
     """Async proxy that forwards chat completion requests upstream.
@@ -74,14 +88,15 @@ class UpstreamProxy:
         try:
             response = await client.post(path, json=payload)
         except httpx.ConnectError:
-            raise ProxyError(f"Cannot connect to upstream {label}")
+            raise ProxyError(f"Cannot connect to upstream {label}", status_code=0)
         except httpx.TimeoutException:
-            raise ProxyError(f"Upstream request timed out: {label}")
+            raise ProxyError(f"Upstream request timed out: {label}", status_code=0)
         except httpx.StreamError as e:
-            raise ProxyError(f"Stream error from upstream {label}: {e}")
+            raise ProxyError(f"Stream error from upstream {label}: {e}", status_code=0)
         if response.status_code != 200:
             raise ProxyError(
-                f"Upstream returned {response.status_code}: {response.text[:500]}"
+                f"Upstream returned {response.status_code}: {response.text[:500]}",
+                status_code=response.status_code,
             )
         return response
 
@@ -93,6 +108,48 @@ class UpstreamProxy:
         payload.update(request.extra or {})
         response = await self._post("/v1/chat/completions", payload, provider_name)
         return ChatCompletionResponse(**response.json())
+
+    async def chat_completion_with_fallback(
+        self, request: ChatCompletionRequest,
+    ) -> tuple[ChatCompletionResponse, str]:
+        """Forward with automatic provider fallback on transient errors.
+
+        Tries every provider that declares this model, in yaml-defined order.
+        Retryable errors (quota/rate-limit/server-down/connection) cause a
+        silent jump to the next provider.  Permanent errors re-raise immediately.
+
+        Returns (response, provider_name_used).
+        """
+        model = request.model
+        candidates = self.config.get_model_providers(model)
+        last_error: Exception | None = None
+
+        for provider in candidates:
+            try:
+                resp = await self.chat_completion(request, provider_name=provider)
+                return resp, provider
+            except ProxyError as e:
+                if e.retryable:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Provider %r failed for model %r (retryable), trying next: %s",
+                        provider, model, e,
+                    )
+                    last_error = e
+                    continue
+                raise
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Provider %r unreachable for model %r, trying next: %s",
+                    provider, model, e,
+                )
+                last_error = e
+                continue
+
+        raise last_error or ProxyError(
+            f"No provider succeeded for model {model}", status_code=0,
+        )
 
     async def chat_completion_stream(
         self, request: ChatCompletionRequest, provider_name: str | None = None,
@@ -111,16 +168,17 @@ class UpstreamProxy:
                 if response.status_code != 200:
                     body = await response.aread()
                     raise ProxyError(
-                        f"Upstream returned {response.status_code}: {body[:500]}"
+                        f"Upstream returned {response.status_code}: {body[:500]}",
+                        status_code=response.status_code,
                     )
                 async for chunk in response.aiter_bytes():
                     yield chunk
         except httpx.ConnectError:
-            raise ProxyError(f"Cannot connect to upstream {label}")
+            raise ProxyError(f"Cannot connect to upstream {label}", status_code=0)
         except httpx.TimeoutException:
-            raise ProxyError(f"Upstream request timed out: {label}")
+            raise ProxyError(f"Upstream request timed out: {label}", status_code=0)
         except httpx.StreamError as e:
-            raise ProxyError(f"Stream error from upstream {label}: {e}")
+            raise ProxyError(f"Stream error from upstream {label}: {e}", status_code=0)
 
     async def list_models(self) -> dict:
         """Proxy the /v1/models endpoint (uses default upstream)."""
