@@ -367,31 +367,38 @@ PROFILES: dict[str, ModelProfile] = {
 
 
 # ── Task-type capability weights ──────────────────────────────────────
-# Each task type values different capability dimensions differently.
-# These weights determine which model dimensions matter most for a given task.
+# Each task type values the 8 capability dimensions differently.
+# Weights are aligned to public benchmark categories (not field-measured on
+# your traffic) — they encode "which skills a task leans on", e.g. 代码生成
+# → coding (LiveCodeBench/SWE-bench), 复杂推理 → reasoning (GPQA/AIME),
+# 翻译校对 → multilingual+writing. Tune per your own results if needed.
 
 TASK_WEIGHTS: dict[str, list[float]] = {
     #               code math reason write multi vision instr agent
     "图片理解":     [0.2, 0.2, 0.4, 0.3, 0.3,  1.0,  0.4,  0.1],
-    "代码生成":     [1.0, 0.5, 0.6, 0.2, 0.1,  0.0,  0.4,  0.2],
-    "代码审查":     [1.0, 0.3, 0.5, 0.1, 0.1,  0.0,  0.5,  0.2],
-    "数据分析":     [0.5, 0.6, 0.8, 0.2, 0.1,  0.0,  0.5,  0.2],
+    "代码生成":     [1.0, 0.5, 0.6, 0.2, 0.1,  0.0,  0.4,  0.3],
+    "代码审查":     [1.0, 0.3, 0.7, 0.1, 0.1,  0.0,  0.6,  0.2],
+    "数据分析":     [0.6, 0.8, 0.8, 0.2, 0.1,  0.0,  0.5,  0.3],
     "文本创作":     [0.1, 0.1, 0.3, 1.0, 0.6,  0.0,  0.5,  0.1],
-    "翻译校对":     [0.1, 0.1, 0.2, 0.8, 1.0,  0.0,  0.6,  0.1],
-    "复杂推理":     [0.4, 0.6, 1.0, 0.3, 0.2,  0.0,  0.6,  0.3],
-    "系统架构":     [0.8, 0.4, 0.9, 0.4, 0.2,  0.0,  0.6,  0.4],
-    "安全审计":     [0.7, 0.5, 0.8, 0.2, 0.1,  0.0,  0.6,  0.3],
-    "性能分析":     [0.7, 0.6, 0.7, 0.2, 0.1,  0.0,  0.5,  0.2],
-    "知识问答":     [0.3, 0.3, 0.5, 0.5, 0.4,  0.0,  0.6,  0.2],
-    "日常闲聊":     [0.3, 0.3, 0.5, 0.5, 0.4,  0.0,  0.6,  0.2],
-    "默认":         [0.3, 0.3, 0.5, 0.5, 0.4,  0.0,  0.6,  0.2],
+    "翻译校对":     [0.1, 0.1, 0.2, 0.8, 1.0,  0.0,  0.7,  0.1],
+    "复杂推理":     [0.4, 0.7, 1.0, 0.3, 0.2,  0.0,  0.6,  0.3],
+    "系统架构":     [0.7, 0.4, 1.0, 0.5, 0.2,  0.0,  0.7,  0.5],
+    "安全审计":     [0.8, 0.5, 0.9, 0.2, 0.1,  0.0,  0.7,  0.3],
+    "性能分析":     [0.8, 0.6, 0.8, 0.2, 0.1,  0.0,  0.6,  0.3],
+    # ── 以下三类都偏轻量，但侧重不同 ──
+    # 知识问答：重正确性与指令遵循，要答得准、答得全
+    "知识问答":     [0.2, 0.4, 0.7, 0.4, 0.4,  0.0,  0.8,  0.2],
+    # 日常闲聊：重表达与指令遵循，能力门槛低 → 整体权重压低，利于选便宜模型
+    "日常闲聊":     [0.1, 0.1, 0.2, 0.6, 0.4,  0.0,  0.5,  0.1],
+    # 默认：未知任务，均衡取中，不偏科
+    "默认":         [0.4, 0.4, 0.5, 0.5, 0.4,  0.0,  0.6,  0.3],
 }
 
 
 def score_model(
     profile: ModelProfile,
     task_weights: list[float],
-    budget_weight: float = 0.3,
+    budget_weight: float = 0.2,
 ) -> float:
     """Compute composite score for a model given a task.
 
@@ -419,8 +426,8 @@ import math
 # Cost-tier boundaries (USD per 1M tokens, applied to weighted average_cost).
 # Override at runtime via Config.cost_tier_thresholds; see policyflow.example.yaml.
 DEFAULT_COST_TIER_THRESHOLDS: dict[str, float] = {
-    "cheap_max": 1.0,   # average_cost < this → cheap
-    "mid_max":   5.0,   # cheap_max ≤ average_cost < this → mid
+    "cheap_max": 0.5,   # average_cost < this → cheap
+    "mid_max":   1.7,   # cheap_max ≤ average_cost < this → mid
                         # ≥ mid_max → expensive
 }
 
@@ -429,7 +436,7 @@ def select_best_model(
     specialty: str,
     available_models: list[str],
     cost_tier: str = "",
-    budget_weight: float = 0.3,
+    budget_weight: float = 0.2,
     cost_tier_thresholds: dict[str, float] | None = None,
 ) -> str | None:
     """Pick the best model for a task type from available candidates.
@@ -464,9 +471,9 @@ def select_best_model(
         if cost_tier == "cheap":
             candidates = [(m, p) for m, p in candidates if p.average_cost < cheap_max]
         elif cost_tier == "mid":
-            candidates = [(m, p) for m, p in candidates if cheap_max <= p.average_cost < mid_max]
-        else:  # expensive
-            candidates = [(m, p) for m, p in candidates if p.average_cost >= mid_max]
+            candidates = [(m, p) for m, p in candidates if p.average_cost < mid_max]
+        # expensive → no cap (whole pool); max_cost_tier is an upper bound,
+        # so each tier includes everything cheaper than its ceiling.
 
     if not candidates:
         return None
@@ -482,7 +489,7 @@ def select_best_models(
     available_models: list[str],
     n: int = 3,
     cost_tier: str = "",
-    budget_weight: float = 0.3,
+    budget_weight: float = 0.2,
     cost_tier_thresholds: dict[str, float] | None = None,
 ) -> list[str]:
     """Return the top-N models for a task (same scoring as select_best_model).
@@ -503,14 +510,13 @@ def select_best_models(
         return []
     if cost_tier in ("cheap", "mid", "expensive"):
         thresholds = cost_tier_thresholds or DEFAULT_COST_TIER_THRESHOLDS
-        cheap_max = thresholds.get("cheap_max", 1.0)
-        mid_max = thresholds.get("mid_max", 5.0)
+        cheap_max = thresholds.get("cheap_max", 0.5)
+        mid_max = thresholds.get("mid_max", 1.7)
         if cost_tier == "cheap":
             candidates = [(m, p) for m, p in candidates if p.average_cost < cheap_max]
         elif cost_tier == "mid":
-            candidates = [(m, p) for m, p in candidates if cheap_max <= p.average_cost < mid_max]
-        else:
-            candidates = [(m, p) for m, p in candidates if p.average_cost >= mid_max]
+            candidates = [(m, p) for m, p in candidates if p.average_cost < mid_max]
+        # expensive → no cap (upper-bound semantics, cumulative tiers)
     if not candidates:
         return []
     scored = [(score_model(p, weights, budget_weight), m) for m, p in candidates]

@@ -216,14 +216,14 @@ class Config:
     def cost_tier_thresholds(self) -> dict[str, float]:
         """USD/M-token boundaries for `max_cost_tier: cheap|mid|expensive`.
 
-        Defaults to {cheap_max: 1.0, mid_max: 5.0}. Tiers are computed against
-        the weighted average_cost (3:1 input:output), so e.g. claude-haiku
-        (input 1.0 / output 5.0 → avg 2.0) lands in mid by default.
+        Defaults to {cheap_max: 0.5, mid_max: 1.7}, calibrated to the domestic
+        model pool so the three tiers each have members. Tiers are computed
+        against the weighted average_cost (3:1 input:output).
         """
         cfg = self.data.get("cost_tiers", {})
         return {
-            "cheap_max": float(cfg.get("cheap_max", 1.0)),
-            "mid_max": float(cfg.get("mid_max", 5.0)),
+            "cheap_max": float(cfg.get("cheap_max", 0.5)),
+            "mid_max": float(cfg.get("mid_max", 1.7)),
         }
 
     # ── Policies ──────────────────────────────────────────────────

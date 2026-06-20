@@ -7,7 +7,10 @@ import sqlite3
 import time
 from pathlib import Path
 
-DB_PATH = Path("policyflow.db")
+# Database lives at the project root, resolved from this file's location —
+# so the DB path is the same no matter which directory the server is
+# launched from (db.py is at <root>/policyflow/db.py, so parent.parent = root).
+DB_PATH = Path(__file__).resolve().parent.parent / "policyflow.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (

@@ -15,8 +15,6 @@ providers:
     models:
       - "deepseek-v4-flash"
       - "deepseek-v4-pro"
-      - "deepseek-v3"
-      - "deepseek-r1"
 
   anthropic:
     base_url: https://api.anthropic.com
@@ -42,8 +40,8 @@ embedding:
 
 # ── Cost tiers ────────────────────────────────────────────────────────
 cost_tiers:
-  cheap_max: 1.0
-  mid_max:   5.0
+  cheap_max: 0.5
+  mid_max:   1.7
 
 # ── Policies (hybrid) ─────────────────────────────────────────────────
 policies_hybrid:

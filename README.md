@@ -26,14 +26,14 @@ PolicyFlow 是一个独立的 OpenAI 兼容代理，借鉴 [NadirClaw](https://g
   │
   ├── ② 策略匹配（按 YAML policies 从上到下扫）
   │     图片检测 → 命中即停
-  │     关键词精确匹配命中 → Embedding 复核语境（≥0.5 才放行，挡掉"苹果"匹"苹果手机"这类歧义）
-  │     未命中 → Embedding 全局语义匹配（阈值 0.5）
+  │     关键词精确匹配命中 → Embedding 复核语境（≥0.25 才放行，挡掉"苹果"匹"苹果手机"这类歧义）
+  │     未命中 → Embedding 全局语义匹配（阈值 0.25）
   │     仍未命中 → 走 default 策略
   │     → 命中后确定任务类型（如"代码生成"、"复杂推理"）
   │
   ├── ③ 路由决策：根据任务类型选模型
   │     写了 route_to → 直接用
-  │     没写 route_to → 按任务类型的 8 维权重对所有可用模型打分，选最高分
+  │     没写 route_to → 按任务类型的 8 维权重对所有可用模型打分，Top-3 加权随机（90/7/3）
   │     选定 model → 查 providers 映射 → 改写 model 字段 + 切对应 base_url
   │
   ├── ④ 级联验证（仅当策略 cascade: true）
@@ -120,31 +120,27 @@ providers:
 | `policies_capability` | capability 模式下的策略集，全由算法选模 |
 | `policies_explicit` | explicit 模式下的策略集，全写死模型 |
 | `cascade` | 级联验证：验证方式、升级链条、最大重试次数。若启用 LLM 裁判，`judge_model` 必须已在 `providers` 中配了真实 Key |
-| `cost_tiers` | `max_cost_tier` 的分档边界（可选，省略用默认 cheap<1.0、mid<5.0） |
+| `cost_tiers` | `max_cost_tier` 的分档边界（可选，省略用默认 cheap<0.5、mid<1.7） |
 | `modifiers` | 四个修饰器的开关 + `strongest_model` / `reasoning_model` 目标模型（详见下方"智能修饰器"节） |
 | `optimizer` | AI 优化引擎：是否启用、用哪个模型分析、最多几条建议。所用模型必须已在 `providers` 中配了真实 Key |
 | `logging` | `log_prompt_preview` 是否记录提问原文（默认 `true`，利于优化建议；隐私敏感设 `false`，详见"AI 优化引擎"节） |
 
 ### Embedding 供应商配置
 
-Embedding API 用于语义匹配（可选，不用也能跑）。默认配置是阿里百炼，换成其他供应商只需改 `policyflow.yaml` 中 `embedding` 段的三项：
-
-| 供应商 | `base_url` | `model` | 对应 `.env` Key |
-|--------|-----------|---------|-----------------|
-| 阿里百炼（默认） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `text-embedding-v4` | `DASHSCOPE_API_KEY` |
-| OpenAI | `https://api.openai.com/v1` | `text-embedding-3-small` | `OPENAI_API_KEY` |
-| DeepSeek | `https://api.deepseek.com` | _(待 DeepSeek 支持)_ | `DEEPSEEK_API_KEY` |
+Embedding API 用于语义匹配（可选，不用也能跑）。默认配置是火山引擎豆包多模态 Embedding，换成其他供应商只需改 `policyflow.yaml` 中 `embedding` 段的三项：
 
 ```yaml
 # policyflow.yaml 中的 embedding 段（按需改 base_url + model）
 embedding:
-  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1   # ← 改这里
+  base_url: https://ark.cn-beijing.volces.com/api/v3            # ← 改这里
   api_key: "${EMBEDDING_API_KEY}"                                # ← .env 里填对应 key
-  model: text-embedding-v4                                       # ← 改这里
-  similarity_threshold: 0.5   # 全局语义匹配阈值
-  verify_threshold: 0.5        # 关键词命中后复核阈值（避免歧义命中）
+  model: doubao-embedding-vision-251215                          # ← 改这里
+  similarity_threshold: 0.25   # 全局语义匹配阈值
+  verify_threshold: 0.25       # 关键词命中后复核阈值（避免歧义命中）
   timeout: 30
 ```
+
+> ⚠️ **阈值要跟着 embedding 模型的尺度走**：不同模型的余弦相似度分布差异很大——OpenAI text-embedding 系相关文本常达 0.5~0.8，而 doubao-embedding-vision 这类即使强相关也只有 0.25~0.4。默认值 0.25 是按 doubao 校准的；如果你换成 OpenAI 等模型，需相应调高（如 0.5），否则会出现大量误命中。判断方法：用 `policyflow classify "<典型问题>"` 看相似度落在什么量级。
 
 > Embedding API 不填会怎样？路由自动降级：跳过关键词复核与全局语义匹配，仅用关键词精确匹配 + 默认策略。不影响服务运行。
 
@@ -401,7 +397,7 @@ routing_mode: hybrid
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `keywords` | string[] | 关键词列表，命中任一即算命中。先精确子串匹配（命中后做 Embedding 复核挡掉歧义），仍未命中再走 Embedding 全局语义匹配（阈值 0.5） |
+| `keywords` | string[] | 关键词列表，命中任一即算命中。先精确子串匹配（命中后做 Embedding 复核挡掉歧义），仍未命中再走 Embedding 全局语义匹配（阈值 0.25） |
 | `max_input_tokens` | int | 输入 token **不超过**这个数才命中。配 `keywords` 用来防止长文被错归 |
 | `min_input_tokens` | int | 输入 token **不小于**这个数才命中。用来过滤掉太短的请求 |
 | `has_image` | bool | 请求含图片才命中（多模态请求） |
@@ -411,7 +407,7 @@ routing_mode: hybrid
 
 关键词匹配是大小写不敏感的子串匹配（OR 逻辑：数组里任一关键词出现在 prompt 里即命中）。
 
-**关键词命中后会做一次 Embedding 复核**——把 prompt 跟该策略的关键词集合算余弦相似度，低于 `verify_threshold`（默认 0.5）则视为误命中、撤销并继续往下走 Embedding 全局匹配。这是为了挡掉「"苹果"关键词误命中"苹果手机坏了"」这种歧义场景。
+**关键词命中后会做一次 Embedding 复核**——把 prompt 跟该策略的关键词集合算余弦相似度，低于 `verify_threshold`（默认 0.25）则视为误命中、撤销并继续往下走 Embedding 全局匹配。这是为了挡掉「"苹果"关键词误命中"苹果手机坏了"」这种歧义场景。
 
 ```yaml
 policies:
@@ -423,7 +419,7 @@ policies:
     cascade: true               # 启用级联验证
 ```
 
-**复核阈值在 `embedding.verify_threshold` 配置**（默认 0.5），调高 → 关键词更容易被推翻，调低 → 关键词更被信任。Embedding API 不可达时跳过复核、直接信任关键词命中（降级路径）。
+**复核阈值在 `embedding.verify_threshold` 配置**（默认 0.25），调高 → 关键词更容易被推翻，调低 → 关键词更被信任。Embedding API 不可达时跳过复核、直接信任关键词命中（降级路径）。
 
 ### 图片检测
 
@@ -436,13 +432,13 @@ policies:
 
 ### Embedding 全局语义匹配（关键词都没命中时的兜底）
 
-如果关键词阶段没命中（或被复核推翻），路由器会用 prompt 跟所有策略的关键词集合做余弦相似度比较，挑相似度最高的策略——前提是相似度 ≥ `similarity_threshold`（默认 0.5）。
+如果关键词阶段没命中（或被复核推翻），路由器会用 prompt 跟所有策略的关键词集合做余弦相似度比较，挑相似度最高的策略——前提是相似度 ≥ `similarity_threshold`（默认 0.25）。
 
 ```yaml
 # embedding 段配置阈值
 embedding:
-  similarity_threshold: 0.5   # 全局匹配阈值
-  verify_threshold: 0.5        # 关键词命中后的复核阈值
+  similarity_threshold: 0.25   # 全局匹配阈值
+  verify_threshold: 0.25       # 关键词命中后的复核阈值
 ```
 
 Embedding API 不可用时此阶段自动跳过，请求落到默认策略。这是 PolicyFlow 设计的**降级路径**之一。
@@ -478,26 +474,34 @@ Embedding API 不可用时此阶段自动跳过，请求落到默认策略。这
 - 数据来源：官方模型卡、Chatbot Arena、SuperCLUE 等公开榜单（2026-06）；无基准的模型取同系列已知模型的保守估算
 - **不需要改代码**——觉得某个模型的某项评分不准？直接编辑 [model_profiles.py](policyflow/model_profiles.py) 里对应数字，重启生效
 
+**评分公式**：综合分 = 能力分 × 80% + 价格分 × 20%。价格分是 log 归一化后的成本效率（便宜 → 高分）。
+
+**不是取最高分，而是 Top-3 加权随机（90/7/3）**：评分前三的模型按 90% / 7% / 3% 的权重随机分流——#1 是绝对主力，同时给 #2、#3 少量流量做容灾预热和额度平滑，避免"唯一最佳模型"一挂全挂。
+
 ### 价格分档（max_cost_tier 工作原理）
 
 模型按**加权平均价**（USD/百万 token）划分三档。加权公式 `(input × 3 + output) / 4`——按真实场景里 input:output ≈ 3:1 的比例计算（chat/RAG/agent 通常长 prompt 短回答），比简单算术平均更贴近实际成本。
 
-默认分档（可在 `policyflow.yaml` 的 `cost_tiers` 段覆盖）：
+**`max_cost_tier` 是价格上限（≤），不是"仅此档"**：
 
-| 档位 | 加权平均价 | 典型模型（默认配置下） |
-|---|---|---|
-| `cheap` | < $1.0 | ernie-speed-pro · deepseek-v4-flash · qwen-flash · gpt-4o-mini · deepseek-v3 · deepseek-v4-pro · **deepseek-r1**（性价比推理王） |
-| `mid` | $1.0 ~ $5.0 | qwen-plus · glm-5.x · kimi-k2.6 · o3-mini · **claude-haiku-4-5** · qwen-max · gpt-4o |
-| `expensive` | ≥ $5.0 | claude-sonnet-4-6 · claude-opus-4-7 · claude-opus-4-8 |
+| 设定 | 可选模型范围 |
+|---|---|
+| `cheap` | 只在 cheap 档里选 |
+| `mid` | cheap + mid（≤ mid 的都可选，能力够就优先便宜的） |
+| `expensive` | 全池放开（≤ expensive = 不设上限，纯按评分选） |
+
+也就是说：上限设得越高，可选范围越大，且永远在范围内优先性价比。给难任务设 `expensive` = 让评分在全部模型里自由挑，而不是强制用最贵的。
+
+默认分档（可在 `policyflow.yaml` 的 `cost_tiers` 段覆盖，下方是按国产模型池校准后的值）：
 
 ```yaml
-# policyflow.yaml 顶部（可选，省略则用默认）
+# policyflow.yaml（可选，省略则用代码内置默认 cheap_max=0.5 / mid_max=1.7）
 cost_tiers:
-  cheap_max: 1.0       # < 此值算 cheap
-  mid_max:   5.0       # cheap_max ≤ 此值算 mid，≥ 此值算 expensive
+  cheap_max: 0.5       # 加权均价 < 此值算 cheap
+  mid_max:   1.7       # < 此值算 mid（含 cheap），≥ 此值算 expensive
 ```
 
-想让 claude-haiku 进 cheap 档？把 `cheap_max` 改到 2.5 即可（haiku 加权均价约 2.0）。
+想让某模型进更低档？查它的加权均价，把对应 `_max` 调到其上即可。
 
 > ⚠️ **价格数据时效性**：[policyflow/cost.py](policyflow/cost.py) 内置的价格表收集于 **2026-06**，覆盖 39 个常用模型，已尽可能贴近各供应商当前官方报价——但 LLM 价格波动大，且部分国产模型 ID 为前瞻性命名，**实际数字可能与最新官方报价存在偏差**。
 >
@@ -621,7 +625,7 @@ cascade:
 
 验证不通过时，PolicyFlow **优先按模型能力评分**选下一个升级目标，而不是照搬静态链：
 
-- **纯能力排序，不看价格**。日常路由会用 30% 的价格权重来省钱，但级联升级只在便宜模型已经失败后才发生——这时诉求是"把事做对"，不是省钱。所以升级阶段价格权重归零，只比谁更能胜任当前任务类型。
+- **纯能力排序，不看价格**。日常路由会用 20% 的价格权重来兼顾省钱，但级联升级只在便宜模型已经失败后才发生——这时诉求是"把事做对"，不是省钱。所以升级阶段价格权重归零，只比谁更能胜任当前任务类型。
 - **升一档，不直接拉满**。从"能力高于当前模型"的可用模型里，选评分最接近的**下一档**，逐步试探；配合 `max_retries` 可多次升级，避免一道小坎就动用最贵的旗舰。
 - **和 capability 选模同源**。无论当前模型是策略写死的（`route_to`）还是系统自选的，升级都用同一套能力评分体系，不会出现"升级反而换到更弱模型"的情况。
 

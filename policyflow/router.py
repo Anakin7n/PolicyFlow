@@ -202,14 +202,23 @@ class RouteDecision:
         self.score = score
         if policy and use_capability and available_models:
             from .policy import PolicyEngine
+            from .model_profiles import select_best_models
             task = PolicyEngine._infer_specialty(policy)
-            best = select_best_model(
-                task, available_models,
+            top = select_best_models(
+                task, available_models, n=3,
                 cost_tier=policy.max_cost_tier,
                 cost_tier_thresholds=cost_tier_thresholds,
             )
-            self.target_model = best or policy.route_to or original_model
-            if best:
+            if top:
+                # Weighted random among Top-3 (90/7/3) — keeps the #1
+                # as the primary workhorse while giving #2/#3 a small
+                # share for fault-tolerance warm-up and quota smoothing.
+                import random
+                weights = [0.90, 0.07, 0.03][:len(top)]
+                self.target_model = random.choices(top, weights=weights)[0]
+            else:
+                self.target_model = policy.route_to or original_model
+            if top:
                 self.method = f"capability({task})"
         else:
             self.target_model = policy.route_to if policy else original_model

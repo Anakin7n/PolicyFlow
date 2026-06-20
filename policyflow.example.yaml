@@ -18,8 +18,6 @@ providers:
     models:
       - "deepseek-v4-flash"
       - "deepseek-v4-pro"
-      - "deepseek-v3"
-      - "deepseek-r1"
 
   qwen:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -133,17 +131,17 @@ embedding:
   base_url: https://ark.cn-beijing.volces.com/api/v3
   api_key: "${EMBEDDING_API_KEY}"
   model: doubao-embedding-vision-251215
-  similarity_threshold: 0.5    # 全局语义匹配阈值（与 verify_threshold 一致）
-  verify_threshold: 0.5        # 关键词命中后的复核阈值（避免"苹果手机"误中"苹果"水果策略）
+  similarity_threshold: 0.25   # 全局语义匹配阈值（按 doubao-embedding 尺度校准，与 verify_threshold 一致）
+  verify_threshold: 0.25       # 关键词命中后的复核阈值（避免"苹果手机"误中"苹果"水果策略）
   timeout: 30
 
 # ── 价格分档（capability 模式下 max_cost_tier 用） ─────────────
 # 分档以加权平均价（input × 3 + output）/ 4 为准（USD/百万 token）
-# 默认：cheap < 1.0、mid 1.0~5.0、expensive ≥ 5.0
-# 想让 deepseek-r1 进 cheap？把 cheap_max 改到 1.5 即可（r1 加权均价约 0.96）
+# 默认：cheap < 0.5、mid 0.5~1.7、expensive ≥ 1.7（按国产模型池校准，三档各有成员）
+# 想让某模型进 cheap？查它的加权均价，把 cheap_max 调到其上即可
 cost_tiers:
-  cheap_max: 1.0
-  mid_max:   5.0
+  cheap_max: 0.5
+  mid_max:   1.7
 
 # ══════════════════════════════════════════════════════════════════════
 # 策略列表 — 从上到下依次匹配，命中即停止，都不命中走"默认"。
@@ -156,7 +154,7 @@ cost_tiers:
 #        任务类型可选：代码生成、代码审查、数学推理、逻辑分析、文本创作、
 #                      翻译校对、图片理解、Agent工具调用、通用问答、
 #                      系统设计、安全审计、性能优化
-#        可选限制预算：max_cost_tier 设为 cheap / mid / expensive
+#        可选价格上限：max_cost_tier 设为 cheap / mid / expensive（≤上限，越高范围越大；expensive=全池放开）
 # ══════════════════════════════════════════════════════════════════════
 
 # ── 自由混合（hybrid 模式使用）────────────────────────────────────
@@ -229,7 +227,7 @@ policies_hybrid:
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
-    route_to: "deepseek-r1"
+    route_to: "deepseek-pro"
 
   - name: "系统架构与设计"
     match:
@@ -238,7 +236,7 @@ policies_hybrid:
         "微服务", "高并发", "分布式", "数据库设计"
       ]
       min_input_tokens: 200
-    route_to: "deepseek-r1"
+    route_to: "glm-5.2"
 
   - name: "安全审计与分析"
     match:
@@ -247,7 +245,7 @@ policies_hybrid:
         "渗透", "加密", "鉴权", "授权", "OAuth"
       ]
       min_input_tokens: 150
-    route_to: "deepseek-r1"
+    route_to: "glm-5.2"
 
   - name: "性能分析与调优"
     match:
@@ -293,6 +291,7 @@ policies_capability:
   - name: "图片理解"
     match:
       has_image: true
+    max_cost_tier: expensive      # 若要降档，需保证该档内有带 vision 能力的模型，否则会选到无法看图的模型
 
   - name: "代码生成"
     match:
@@ -332,6 +331,7 @@ policies_capability:
         "写诗", "写歌词", "故事", "小说", "剧本",
         "扩写", "续写", "改写"
       ]
+    max_cost_tier: cheap
 
   - name: "翻译、摘要、格式化"
     match:
@@ -344,6 +344,7 @@ policies_capability:
       ]
       max_input_tokens: 800
     cascade: true
+    max_cost_tier: cheap
 
   - name: "复杂推理与分析"
     match:
@@ -353,6 +354,7 @@ policies_capability:
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
+    max_cost_tier: expensive
 
   - name: "系统架构与设计"
     match:
@@ -361,6 +363,7 @@ policies_capability:
         "微服务", "高并发", "分布式", "数据库设计"
       ]
       min_input_tokens: 200
+    max_cost_tier: expensive
 
   - name: "安全审计与分析"
     match:
@@ -369,6 +372,7 @@ policies_capability:
         "渗透", "加密", "鉴权", "授权", "OAuth"
       ]
       min_input_tokens: 150
+    max_cost_tier: expensive
 
   - name: "性能分析与调优"
     match:
@@ -377,6 +381,7 @@ policies_capability:
         "加速", "慢查询", "优化SQL", "高延迟"
       ]
       min_input_tokens: 150
+    max_cost_tier: expensive
 
   - name: "知识问答与学习"
     match:
@@ -400,11 +405,12 @@ policies_capability:
         "什么是", "怎么样", "好吗"
       ]
       max_input_tokens: 150
-    max_cost_tier: cheap          # 限定只在便宜档里挑
+    max_cost_tier: cheap          # 价格上限 = cheap：只用便宜档模型
 
   - name: "默认"
     match:
       default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
+    max_cost_tier: cheap
 
 # ── 全指定（explicit 模式使用）────────────────────────────────────
 # 全部写死模型，系统不插手。
@@ -431,7 +437,7 @@ policies_explicit:
         "重构", "refactor", "单元测试", "写测试", "test case",
         "报错", "异常", "stacktrace"
       ]
-    route_to: "deepseek-v4-pro"
+    route_to: "glm-5.2"
 
   - name: "数据分析与处理"
     match:
@@ -440,7 +446,7 @@ policies_explicit:
         "统计", "趋势", "异常值", "数据可视化", "图表",
         "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
       ]
-    route_to: "deepseek-v4-pro"
+    route_to: "glm-5.2"
 
   - name: "文本创作与写作"
     match:
@@ -452,7 +458,7 @@ policies_explicit:
         "写诗", "写歌词", "故事", "小说", "剧本",
         "扩写", "续写", "改写"
       ]
-    route_to: "glm-5.2"
+    route_to: "deepseek-v4-flash"
 
   - name: "翻译、摘要、格式化"
     match:
@@ -475,7 +481,7 @@ policies_explicit:
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
-    route_to: "deepseek-r1"
+    route_to: "deepseek-v4-pro"
 
   - name: "系统架构与设计"
     match:
@@ -484,7 +490,7 @@ policies_explicit:
         "微服务", "高并发", "分布式", "数据库设计"
       ]
       min_input_tokens: 200
-    route_to: "deepseek-r1"
+    route_to: "glm-5.2"
 
   - name: "安全审计与分析"
     match:
@@ -493,7 +499,7 @@ policies_explicit:
         "渗透", "加密", "鉴权", "授权", "OAuth"
       ]
       min_input_tokens: 150
-    route_to: "deepseek-r1"
+    route_to: "glm-5.2"
 
   - name: "性能分析与调优"
     match:
@@ -546,7 +552,6 @@ cascade:
   escalation_chain:                # 静态升级链（兜底）。正常走能力评分逐档升，只在极少数策略名无法映射任务类型时备用
     - "deepseek-v4-flash"
     - "deepseek-v4-pro"
-    - "deepseek-r1"
 
 # ══════════════════════════════════════════════════════════════════════
 # 日志 — 记录每次路由决策到 SQLite，用于仪表盘和 AI 优化。

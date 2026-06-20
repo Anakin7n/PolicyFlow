@@ -16,8 +16,6 @@ providers:
     models:
       - "deepseek-v4-flash"
       - "deepseek-v4-pro"
-      - "deepseek-v3"
-      - "deepseek-r1"
 
   qwen:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -59,8 +57,8 @@ embedding:
 
 # ── Cost tiers ────────────────────────────────────────────────────────
 cost_tiers:
-  cheap_max: 1.0
-  mid_max:   5.0
+  cheap_max: 0.5
+  mid_max:   1.7
 
 # ── Policies (hybrid) ─────────────────────────────────────────────────
 # 重要策略：route_to 锁死（你说的算）

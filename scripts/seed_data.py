@@ -159,7 +159,7 @@ def _top_models(task: str, avail: list, cost_tier: str, thresholds: dict, n: int
     cands = [(m, PROFILES[m]) for m in avail if m in PROFILES]
     if cost_tier in ("cheap", "mid", "expensive"):
         th = thresholds or DEFAULT_COST_TIER_THRESHOLDS
-        cmax = th.get("cheap_max", 1.0); mmax = th.get("mid_max", 5.0)
+        cmax = th.get("cheap_max", 0.5); mmax = th.get("mid_max", 1.7)
         if cost_tier == "cheap":
             cands = [(m, p) for m, p in cands if p.average_cost < cmax]
         elif cost_tier == "mid":
@@ -175,16 +175,14 @@ def _top_models(task: str, avail: list, cost_tier: str, thresholds: dict, n: int
 def _weighted_pick(top: list):
     """Weighted-random pick from [(model, score), ...].
 
-    Uses positional weights (70/20/10) instead of raw scores, simulating
-    real-world quota exhaustion: #1 handles most traffic, #2 and #3 step
-    in as #1's providers hit rate limits / quota caps over time.
+    Mirrors the router's 90/7/3 distribution: #1 is the primary workhorse,
+    #2 and #3 get a small share for fault-tolerance and quota smoothing.
     """
     models = [m for m, _ in top]
-    pos_weights = [0.70, 0.20, 0.10][:len(top)]
-    # Normalize
-    total = sum(pos_weights)
-    pos_weights = [w / total for w in pos_weights]
-    return random.choices(models, weights=pos_weights)[0]
+    weights = [0.90, 0.07, 0.03][:len(top)]
+    total = sum(weights)
+    weights = [w / total for w in weights]
+    return random.choices(models, weights=weights)[0]
 
 
 def _token_ranges(policy_name: str):

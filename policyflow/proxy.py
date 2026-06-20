@@ -79,6 +79,24 @@ class UpstreamProxy:
             await client.aclose()
         self._clients.clear()
 
+    def _chat_path(self, provider_name: str | None) -> str:
+        """Build the chat-completions path for a provider.
+
+        If the provider's base_url already ends in an API version segment
+        (…/v1, /v2, /v3, /v4), only append '/chat/completions' — otherwise
+        the version would be duplicated (e.g. Volc Coding Plan's base_url is
+        …/api/coding/v3, which 404s on '/v1/chat/completions').  Versionless
+        base_urls (e.g. https://api.deepseek.com) get the '/v1' prefix.
+        """
+        import re
+        if provider_name:
+            base = self.config.get_provider_config(provider_name).get("base_url", "")
+        else:
+            base = self.config.upstream_base_url
+        if re.search(r"/v\d+$", base.rstrip("/")):
+            return "/chat/completions"
+        return "/v1/chat/completions"
+
     async def _post(
         self, path: str, payload: dict, provider_name: str | None = None,
     ) -> httpx.Response:
@@ -106,7 +124,7 @@ class UpstreamProxy:
         """Forward a non-streaming chat completion request upstream."""
         payload = request.model_dump(exclude_none=True, exclude={"extra"})
         payload.update(request.extra or {})
-        response = await self._post("/v1/chat/completions", payload, provider_name)
+        response = await self._post(self._chat_path(provider_name), payload, provider_name)
         return ChatCompletionResponse(**response.json())
 
     async def chat_completion_with_fallback(
@@ -174,7 +192,7 @@ class UpstreamProxy:
         payload.update(request.extra or {})
 
         try:
-            async with client.stream("POST", "/v1/chat/completions", json=payload) as response:
+            async with client.stream("POST", self._chat_path(provider_name), json=payload) as response:
                 if response.status_code != 200:
                     body = await response.aread()
                     raise ProxyError(
