@@ -539,11 +539,11 @@ policies_explicit:
 # ══════════════════════════════════════════════════════════════════════
 cascade:
   enabled: true
-  verifier: rule_only           # rule_only=纯规则 / llm_judge=AI裁判 / rule_then_llm=先规则再AI
-  judge_model: ""               # AI 裁判模型（空=不用）。⚠ 必须已在 providers 中配了真实 Key
-  judge_prompt_template: ""     # 自定义裁判提示词（空=用默认）
-  max_retries: 2                # 最多升级几次
-  escalation_chain:             # 升级链条，从便宜到贵
+  verifier: rule_then_llm          # rule_only=纯规则 / llm_judge=AI裁判 / rule_then_llm=先规则再AI
+  judge_model: "deepseek-v4-flash" # AI 裁判模型（空=不用）。⚠ 必须已在 providers 中配了真实 Key，否则自动降级为 upstream.fallback_model
+  judge_prompt_template: ""        # 自定义裁判提示词（空=用默认）
+  max_retries: 2                   # 最多升级几次
+  escalation_chain:                # 静态升级链（兜底）。正常走能力评分逐档升，只在极少数策略名无法映射任务类型时备用
     - "deepseek-v4-flash"
     - "deepseek-v4-pro"
     - "deepseek-r1"
@@ -559,7 +559,7 @@ logging:
 # ══════════════════════════════════════════════════════════════════════
 optimizer:
   enabled: true
-  model: deepseek-v4-flash      # 用哪个模型分析。⚠ 必须已在 providers 中配了真实 Key
+  model: deepseek-v4-flash      # 用哪个模型分析。⚠ 必须已在 providers 中配了真实 Key，否则自动降级为 upstream.fallback_model
   max_suggestions: 5            # 最多给几条建议
 
 # ══════════════════════════════════════════════════════════════════════

@@ -581,7 +581,15 @@ modifiers:
 
 ## 级联验证
 
-借鉴 NadirClaw：分类器不需要完美，先让便宜模型试试，不行再换贵的。
+PolicyFlow 有三层独立的容灾/升级机制，各司其职：
+
+| 机制 | 触发条件 | 做什么 | 控制方 |
+|---|---|---|---|
+| **Provider 容灾** | 当前模型的某个供应商挂了 | 同一模型换下一个供应商 | 永远生效，无需配置 |
+| **模型容灾** | capability 选中的模型所有供应商全挂 | 换综合评分 Top-2 模型 | 仅 capability 模式自动生效 |
+| **质量级联** | 回答质量不达标（规则或 AI 判定） | 换纯能力评分更高一档的模型 | 策略级 `cascade: true` 控制 |
+
+> route_to 的模型走 Provider 容灾 → upstream.fallback_model → 502
 
 两档验证器：
 
@@ -607,7 +615,7 @@ cascade:
     - "deepseek-r1"
 ```
 
-> **`judge_model` 的 API Key 从哪来？** 从 `providers` 段自动查找（和路由请求走同一套 provider 容灾逻辑）。因此 `judge_model` **必须是某个 provider 里声明的模型、且该 provider 配了真实 Key**，否则裁判调用会因为找不到凭证而失败。
+> **`judge_model` 的 API Key 从哪来？** 从 `providers` 段自动查找（和路由请求走同一套 provider 容灾逻辑）。若 `judge_model` 不在任何 provider 里、或配了空 Key，会自动降级为 `upstream.fallback_model` 并用 `upstream` 的 Key 调用——裁判不会报错，但实际用的模型和你指定的是两个。因此 `judge_model` 必须在 providers 里配好真实 Key。`optimizer.model` 同理。
 
 ### 升级到哪个模型？——按能力评分逐档升
 
@@ -617,7 +625,7 @@ cascade:
 - **升一档，不直接拉满**。从"能力高于当前模型"的可用模型里，选评分最接近的**下一档**，逐步试探；配合 `max_retries` 可多次升级，避免一道小坎就动用最贵的旗舰。
 - **和 capability 选模同源**。无论当前模型是策略写死的（`route_to`）还是系统自选的，升级都用同一套能力评分体系，不会出现"升级反而换到更弱模型"的情况。
 
-> `escalation_chain` 退化为**兜底**：仅当任务类型无法识别、或可用模型不在能力库中时，才回退到这条手写链。正常情况下你不需要精心维护它。
+> `escalation_chain` 退化为**兜底**：仅在极少数策略名无法映射到已知任务类型时，才回退到这条手写链。正常情况下能力评分覆盖所有标准策略名，你不需要刻意维护这条链。
 
 Judge 失败原因会写入数据库，供 AI 优化引擎分析——不只是知道"升级率高"，还能知道"47% 是因为编造不存在的 API 参数"。
 
@@ -645,7 +653,7 @@ $ python -m policyflow optimize --since 30d
   📊 汇总: 执行以上建议，预计每月节省 ¥29.00
 ```
 
-> **`optimizer.model` 的 API Key 从哪来？** 和级联裁判一样，从 `providers` 段自动查找并走 provider 容灾。**必须用 `providers` 里声明了且配了真实 Key 的模型**，否则 optimize 命令会报错。
+> **`optimizer.model` 的 API Key 从哪来？** 和级联裁判一样的降级链路：找不到 provider → 自动改用 `upstream.fallback_model`。因此也必须在 providers 里配好真实 Key。
 
 ### 提问原文与隐私（`logging.log_prompt_preview`）
 

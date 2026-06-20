@@ -173,20 +173,38 @@ def _top_models(task: str, avail: list, cost_tier: str, thresholds: dict, n: int
 
 
 def _weighted_pick(top: list):
-    """Weighted-random pick from [(model, score), ...] using score as weight."""
+    """Weighted-random pick from [(model, score), ...].
+
+    Uses positional weights (70/20/10) instead of raw scores, simulating
+    real-world quota exhaustion: #1 handles most traffic, #2 and #3 step
+    in as #1's providers hit rate limits / quota caps over time.
+    """
     models = [m for m, _ in top]
-    scores = [max(s, 0.01) for _, s in top]
-    return random.choices(models, weights=scores)[0]
+    pos_weights = [0.70, 0.20, 0.10][:len(top)]
+    # Normalize
+    total = sum(pos_weights)
+    pos_weights = [w / total for w in pos_weights]
+    return random.choices(models, weights=pos_weights)[0]
 
 
-def _token_ranges(model: str):
-    from policyflow.cost import _lookup_price
-    out_price = _lookup_price(model)[1]
-    if out_price < 0.5:
-        return (60, 600), (80, 900)
-    if out_price < 2.5:
-        return (120, 1800), (150, 2400)
-    return (300, 3000), (300, 4000)
+def _token_ranges(policy_name: str):
+    """Realistic prompt/completion token ranges by task type.
+
+    Coding / architecture / audits are heavy (large codebases, long context).
+    Translation / chat / formatting are light.  Knowledge / writing are mid.
+    """
+    heavy_tasks = {"代码生成", "代码审查与调试", "系统架构与设计",
+                   "安全审计与分析", "复杂推理与分析"}
+    mid_tasks   = {"数据分析与处理", "文本创作与写作", "知识问答与学习",
+                   "性能分析与调优"}
+    # light: 翻译/摘要/格式化, 日常闲聊与简单问答, 图片理解, 默认
+
+    if policy_name in heavy_tasks:
+        return (2000, 80000), (1000, 25000)
+    if policy_name in mid_tasks:
+        return (500, 20000), (300, 12000)
+    # Light — short prompts, brief answers
+    return (100, 3000), (100, 4000)
 
 
 def seed(conn: sqlite3.Connection, n: int = 5000) -> None:
@@ -237,7 +255,7 @@ def seed(conn: sqlite3.Connection, n: int = 5000) -> None:
         ts = now - timedelta(days=days_ago, hours=random.randint(0, 23),
                              minutes=random.randint(0, 59))
 
-        pr, cr = _token_ranges(model)
+        pr, cr = _token_ranges(p.name)
         pt = random.randint(*pr)
         ct = random.randint(*cr)
         cost = cost_mod.calc_cost(model, pt, ct)

@@ -477,6 +477,47 @@ def select_best_model(
     return scored[0][1]
 
 
+def select_best_models(
+    specialty: str,
+    available_models: list[str],
+    n: int = 3,
+    cost_tier: str = "",
+    budget_weight: float = 0.3,
+    cost_tier_thresholds: dict[str, float] | None = None,
+) -> list[str]:
+    """Return the top-N models for a task (same scoring as select_best_model).
+
+    Used for capability model failover: if the #1 model's providers all fail,
+    transparently try #2, #3, ... — no cascade switch, no pure-ability
+    escalation, just "next-best by the same formula".
+    """
+    weights = TASK_WEIGHTS.get(specialty)
+    if not weights:
+        return []
+    candidates = [
+        (model_id, PROFILES[model_id])
+        for model_id in available_models
+        if model_id in PROFILES
+    ]
+    if not candidates:
+        return []
+    if cost_tier in ("cheap", "mid", "expensive"):
+        thresholds = cost_tier_thresholds or DEFAULT_COST_TIER_THRESHOLDS
+        cheap_max = thresholds.get("cheap_max", 1.0)
+        mid_max = thresholds.get("mid_max", 5.0)
+        if cost_tier == "cheap":
+            candidates = [(m, p) for m, p in candidates if p.average_cost < cheap_max]
+        elif cost_tier == "mid":
+            candidates = [(m, p) for m, p in candidates if cheap_max <= p.average_cost < mid_max]
+        else:
+            candidates = [(m, p) for m, p in candidates if p.average_cost >= mid_max]
+    if not candidates:
+        return []
+    scored = [(score_model(p, weights, budget_weight), m) for m, p in candidates]
+    scored.sort(reverse=True)
+    return [m for _, m in scored[:n]]
+
+
 def next_stronger_model(
     specialty: str,
     current_model: str,

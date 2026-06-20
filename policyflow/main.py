@@ -183,8 +183,8 @@ async def anthropic_messages(
             cascade_specialty = (
                 PolicyEngine._infer_specialty(decision.policy) if decision.policy else ""
             )
-            response, cascade_attempts, judge_reason_val = await _forward_with_cascade(
-                proxy, cascade, openai_req, cascade_specialty, available_models,
+            response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
+                proxy, cascade, openai_req, decision, cascade_specialty, available_models,
             )
         except HTTPException:
             success = False
@@ -324,8 +324,8 @@ async def chat_completions(
             cascade_specialty = (
                 PolicyEngine._infer_specialty(decision.policy) if decision.policy else ""
             )
-            response, cascade_attempts, judge_reason_val = await _forward_with_cascade(
-                proxy, cascade, request, cascade_specialty, available_models,
+            response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
+                proxy, cascade, request, decision, cascade_specialty, available_models,
             )
     except HTTPException:
         success = False
@@ -414,6 +414,50 @@ def _log_to_db(
         logger.warning("Failed to log request: %s", exc)
 
 
+async def _try_with_capability_fallback(
+    proxy: UpstreamProxy,
+    cascade: CascadeValidator,
+    request: ChatCompletionRequest,
+    decision,
+    specialty: str,
+    available_models: list[str],
+) -> tuple[ChatCompletionResponse, int, str]:
+    """Capability model failover: try top-N models by comprehensive scoring.
+
+    For capability-routed requests, if the #1 model's providers are all down,
+    transparently retry #2, #3, ... using the same weighted scoring.  Quality
+    cascade is the final step on whichever model succeeds.
+
+    For route_to requests: single call, no model retry.
+    """
+    if isinstance(decision.method, str) and decision.method.startswith("capability"):
+        from .model_profiles import select_best_models
+        cost_tier = getattr(decision.policy, "max_cost_tier", "") if decision.policy else ""
+        thresholds = proxy.config.cost_tier_thresholds
+        fallback = select_best_models(
+            specialty, available_models, n=3,
+            cost_tier=cost_tier, cost_tier_thresholds=thresholds,
+        )
+        if not fallback:
+            fallback = [request.model]
+    else:
+        # route_to / hybrid-explicit: no model failover
+        fallback = [request.model]
+
+    last_err: Exception | None = None
+    for model in fallback:
+        request.model = model
+        try:
+            return await _forward_with_cascade(
+                proxy, cascade, request, specialty, available_models,
+            )
+        except ProxyError as e:
+            last_err = e
+            logger.warning("Capability failover: %s failed, trying next in %s", model, fallback)
+            continue
+    raise HTTPException(status_code=502, detail=str(last_err or "all models exhausted"))
+
+
 async def _forward_with_cascade(
     proxy: UpstreamProxy,
     cascade: CascadeValidator,
@@ -421,39 +465,32 @@ async def _forward_with_cascade(
     specialty: str = "",
     available_models: list[str] | None = None,
 ) -> tuple[ChatCompletionResponse, int, str]:
-    """Forward request with cascade escalation on validation failure.
+    """Forward request and run quality-cascade validation.
 
-    When ``specialty`` and ``available_models`` are given, escalation picks the
-    next model up by pure capability; otherwise it falls back to the static
-    escalation_chain. Returns (response, cascade_attempts, judge_reason).
+    Quality cascade only: validates the response and escalates on quality
+    failure.  Proxy errors are NOT handled here — model failover (capability
+    top-N retry) and provider fallback (upstream.fallback_model) are the
+    caller's / proxy layer's responsibility.
+
+    Returns (response, cascade_attempts, judge_reason).
     """
     max_attempts = cascade.config.max_retries + 1
     cascade_attempts = 0
     judge_reason = ""
     verifier = cascade.config.verifier
 
-    # If cascade is completely disabled, just forward once and return
+    # Quality cascade disabled → forward once, no validation
     if not cascade.config.enabled:
-        try:
-            response, provider_name = await proxy.chat_completion_with_fallback(request)
-        except ProxyError as e:
-            raise HTTPException(status_code=502, detail=str(e))
+        response, _ = await proxy.chat_completion_with_fallback(request)
         return response, 0, ""
 
     for attempt in range(max_attempts):
         current_model = request.model
 
         try:
-            response, provider_name = await proxy.chat_completion_with_fallback(request)
-        except ProxyError as e:
-            logger.warning("Upstream error (attempt %d): %s", attempt + 1, e)
-            next_model = cascade.get_next_model(current_model, specialty, available_models)
-            if next_model and attempt < max_attempts - 1:
-                request.model = next_model
-                cascade_attempts += 1
-                logger.info("Fallback: %s → %s", current_model, next_model)
-                continue
-            raise HTTPException(status_code=502, detail=str(e))
+            response, _ = await proxy.chat_completion_with_fallback(request)
+        except ProxyError:
+            raise  # model failover belongs to the caller, not here
 
         # ── Rule-based validation (skip if verifier is llm_judge-only) ──
         if verifier != "llm_judge":

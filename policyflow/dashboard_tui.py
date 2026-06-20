@@ -30,8 +30,46 @@ PROVIDER = {
     "doubao":   {"label": "Doubao",   "main": "#af5f87", "shades": ["#d787af", "#e0a0c0", "#eabad1", "#f4d4e2"]},
     "kimi":     {"label": "Kimi",     "main": "#875faf", "shades": ["#af87d7", "#c0a0e0", "#d1baea", "#e2d4f4"]},
     "ernie":    {"label": "ERNIE",    "main": "#5f8787", "shades": ["#87afaf", "#a0c0c0", "#bad1d1", "#d4e2e2"]},
+    "minimax":  {"label": "MiniMax",  "main": "#d7875f", "shades": ["#e0a087", "#eaba9f", "#f4d4c0", "#f4e8d4"]},
     "other":    {"label": "Other",    "main": "#878787", "shades": ["#afafaf", "#c0c0c0", "#d1d1d1", "#e2e2e2"]},
 }
+
+# Fallback palette for providers not listed above — auto-assigned by
+# model name prefix, so new providers get a distinct colour without
+# manual updates to this file.
+_AUTO_PALETTE = [
+    {"main": "#d7875f", "shades": ["#e0a087", "#eaba9f", "#f4d4c0", "#f4e8d4"]},  # coral
+    {"main": "#87af5f", "shades": ["#a0d787", "#baeaa0", "#d4f4c0", "#e2f4d4"]},  # lime
+    {"main": "#5fafaf", "shades": ["#87d7d7", "#a0e0e0", "#baeaea", "#d4f4f4"]},  # teal
+    {"main": "#af5f87", "shades": ["#d787af", "#e0a0c0", "#eabad1", "#f4d4e2"]},  # rose
+    {"main": "#8787af", "shades": ["#afafd7", "#c0c0e0", "#d1d1ea", "#e2e2f4"]},  # slate
+    {"main": "#af875f", "shades": ["#d7af87", "#e0c0a0", "#ead1ba", "#f4e2d4"]},  # tan
+]
+_auto_provider_cache: dict[str, dict] = {}
+
+def _classify_provider(model: str) -> tuple[str, dict]:
+    """Resolve a model ID to (provider_key, {main, shades, label}).
+
+    Matches known providers by name-prefix first.  Unknown providers get
+    an auto-generated entry with a colour from the fallback palette so
+    they never collapse into the grey 'other' bucket.
+    """
+    lo = model.lower()
+    for key in PROVIDER:
+        if key != "other" and lo.startswith(key):
+            return key, PROVIDER[key]
+
+    # Auto-provider: use the first segment (before '-' / '.') as the key.
+    prefix = lo.split("-")[0].split(".")[0]
+    if prefix in PROVIDER:
+        return prefix, PROVIDER[prefix]
+
+    if prefix not in _auto_provider_cache:
+        idx = len(_auto_provider_cache) % len(_AUTO_PALETTE)
+        info = dict(_AUTO_PALETTE[idx])
+        info["label"] = prefix.capitalize()
+        _auto_provider_cache[prefix] = info
+    return prefix, _auto_provider_cache[prefix]
 
 POLICY_PALETTE = ["#5faf5f", "#5f87af", "#afaf5f", "#af5faf",
                   "#5fafaf", "#af875f", "#87af5f", "#af5f87"]
@@ -122,11 +160,10 @@ def _model_table(model_rows: list, bar_w: int, label_w: int) -> RichTable:
     groups: dict[str, list[dict]] = {}
     all_models: list[dict] = []
     for r in model_rows:
-        model = r["routed_model"]; p = "other"
-        for key in PROVIDER:
-            if key != "other" and model.lower().startswith(key): p = key; break
+        model = r["routed_model"]
+        key, _ = _classify_provider(model)
         m = {"model": model, "cnt": r["cnt"], "cost": r["cost"]}
-        groups.setdefault(p, []).append(m)
+        groups.setdefault(key, []).append(m)
         all_models.append(m)
 
     total_cost_all = sum(m["cost"] for m in all_models) or 1
@@ -135,7 +172,7 @@ def _model_table(model_rows: list, bar_w: int, label_w: int) -> RichTable:
     sorted_p = sorted(groups.items(), key=lambda kv: sum(m["cost"] for m in kv[1]), reverse=True)
 
     for p_name, models in sorted_p:
-        info = PROVIDER.get(p_name, PROVIDER["other"])
+        info = PROVIDER.get(p_name) or _auto_provider_cache.get(p_name, PROVIDER["other"])
         p_cost = sum(m["cost"] for m in models)
         p_req  = sum(m["cnt"] for m in models)
         p_pct  = p_cost / total_cost_all * 100  # % of global
@@ -298,7 +335,7 @@ class PolicyFlowDashboard(App):
     """Full-page scroll dashboard — all content in one VerticalScroll."""
 
     CSS = """
-    Screen { background: #1c1c22; }
+    Screen { background: #1c1c22; scrollbar-color: #141416; scrollbar-color-hover: #28282e; scrollbar-color-active: #33333a; }
 
     #header {
         dock: top;
@@ -377,6 +414,13 @@ class PolicyFlowDashboard(App):
         text-style: bold;
     }
     DataTable > .datatable--cursor { background: #33334a; }
+
+    /* Scrollbar: dark, subtle — blends into background */
+    * {
+        scrollbar-color: #141416;
+        scrollbar-color-hover: #28282e;
+        scrollbar-color-active: #33333a;
+    }
     """
 
     BINDINGS = [
