@@ -1,10 +1,59 @@
-# PolicyFlow
+# PolicyFlow 🐙
 
-> 一个 OpenAI 兼容的策略路由代理，给 LLM API 调用装上「什么请求用什么模型」的大脑，省了多少看得见。
+> 把简单请求路由到便宜模型，全自动。实际省 50-65%。
 
-PolicyFlow 是一个独立的 OpenAI 兼容代理，借鉴 [NadirClaw](https://github.com/nadirclaw/nadirclaw) 的级联验证思路。管理员通过 YAML 定义路由策略，系统自动将简单请求导向便宜模型、复杂请求保留高级模型，并通过 CLI 提供成本分析和 AI 优化建议。
+**你那金子般金贵的 Token 正在为了处理那句 “你好，在吗” 熊熊燃烧，而你的钱包在角落里默默流泪。😭**
 
-**核心差异化**：策略透明（YAML 可配）、多供应商直连、能力感知路由（自动选最适合的模型）、LLM-as-Judge 级联验证、AI 优化引擎、Textual 全屏仪表盘。
+别再把真金白银花在“刀把”上了！PolicyFlow 是一个极具性价比的智能路由。它绝不瞎“摸鱼”，而是懂得把好钢用在刀刃上：既然平价模型闭着眼睛就能给你满分答卷，何必还要浪费顶级模型的昂贵算力？
+智能识别任务门槛，精准匹配“刚刚好”的算力，确保输出智商始终在线。API 成本立省 40% - 70%！用更少的钱，装最大的杯。
+
+PolicyFlow 是一个 YAML 驱动的策略路由代理——你可以定义"什么请求用什么模型"，也可以选择系统预设好的算法自动选择最具性价比的模型。它在每次调用时自动改写 model 字段、切换供应商。不用改客户端代码，不用装中间层。
+
+**你的 YAML。你的 Key。没有黑盒。** 策略即配置，改一行生效，不藏逻辑在代码里。供应商 API Key 直连，不做中间代理。
+
+<p align="center">
+  支持 <strong>Cursor</strong> · <strong>Claude Code</strong> · <strong>Codex CLI</strong> · <strong>Aider</strong> · <strong>ChatBox</strong> · <strong>OpenAI SDK</strong> · <strong>Anthropic 原生协议</strong> · 任意 OpenAI 兼容客户端
+</p>
+
+**一次普通办公会话，省了多少：**
+
+```
+  "帮我翻译这封邮件"          → deepseek-v4-flash      ¥0.01
+  "debug 这段代码, 报错了"    → deepseek-v4-pro        ¥0.14
+  "设计支付系统的数据模型"     → kimi-k2.7-code          ¥1.27
+  "帮我写个 SQL 查询"         → deepseek-v4-pro        ¥0.08
+  "推荐几本好看的科幻小说"       → deepseek-v4-flash      ¥0.01
+
+  路由后实际花费 ¥1.50    如果全用 kimi-k2.7-code  ¥2.15
+
+  单次会话省 30%。日常流量里翻译/闲聊/格式化这类轻任务占大多数
+  （~70%），实际月省更高。经1000多次真实请求测试后约省 58%。
+```
+## “从裸调 API 到智能调度，PolicyFlow 能做什么？”
+
+- **YAML 即策略，改一行生效。** 不写死在代码里——今天觉得"翻译"该走便宜模型，打开 yaml 把 max_cost_tier 从 mid 改成 cheap，重启即生效。
+- **两种方式自由组合。** 想精确控制？写 `route_to` 把这任务钉死到一个模型，你说翻译任务用豆包，我就用豆包。想省心？算法帮你选， 8 维能力分（编码、推理、写作、多语言……），13个任务类型各有对应的八个维度权重。翻译看重写作和多语言，架构看重编码和推理，帮你选出最合适的那一个。
+- **自建 Key 和平台套餐统一调度，规则透明。** 各大模型的直连 Key、各厂商Coding Plan的聚合 Key（一个 Key 下挂 Kimi/GLM/豆包/MiniMax 等多个模型）在同一条 YAML 里管理，策略统一分配到各自端点。平台 auto 的局限在于：规则不透明（无法解释为何选 A 不选 B），范围局限于套餐内模型，无法纳入自建 Key。PolicyFlow 取消了这两条边界——所有来源的模型在同一任务维度下按同一套能力评分竞争，你定策略，你来dispatch，逻辑完全可见。
+**双维静默容灾。** 提供“供应商”与“模型”两层保障：支持同模型多 Provider 轮询，主Provider挂了（断连、额度耗尽）自动切备用Provider；同时每个任务支持配置 Top-3 候选模型，主模型不可用时秒切备选。双重防线兜底，全程无感，丝滑 Coding。
+- **省了多少全记着。** 每条请求记入 SQLite——走了哪个策略、花了多少钱、和 baseline 比省了多少。有全屏 TUI 仪表盘，有 AI 优化引擎（分析日志出建议），有 CLI export 给你二次分析。
+
+## 怎么用
+
+PolicyFlow 运行在你的本地环境（默认监听 localhost:8000）。你只需把手头 AI 工具的 API Base URL 指向它，剩下的调度工作全部自动完成。不改代码、不存 Key、不碰数据。 它不属于任何第三方中介，就是一个完全透明的私有本地代理。
+
+```
+你的工具（Cursor / Claude Code / codex / …）
+  └→ POST localhost:8000/v1/chat/completions
+     { "model": "随便写", "messages": [...] }  
+
+         PolicyFlow
+           ├─ 看了你的消息，匹配策略
+           ├─ 改写 model，切到对应供应商
+           ├─ 转发请求，拿到响应
+           └─ 把响应原样返回（附 X-PolicyFlow-* 头，告诉你走了哪个策略）
+
+  响应回你的工具，和直连供应商一样。
+```
 
 ## 核心流程
 
@@ -12,7 +61,7 @@ PolicyFlow 是一个独立的 OpenAI 兼容代理，借鉴 [NadirClaw](https://g
 你的客户端（Cursor / Claude Code / Codex CLI / Aider / ChatBox / OpenAI SDK 等）
   发请求过来 →
     OpenAI 兼容协议  → POST http://localhost:8000/v1/chat/completions
-    Anthropic 原生协议 → POST http://localhost:8000/v1/messages   （命令行 agent 用这个）
+    Anthropic 原生协议 → POST http://localhost:8000/v1/messages   （Claude Code 等 Anthropic 原生客户端用）
   请求体: { model: "gpt-4o", messages: [...], tools?: [...] }
   请求头: X-Session-ID（客户端自己生成的会话 ID，不传也行；传了的话同一 ID 30 分钟内固定走同一个模型）
   │
@@ -32,22 +81,22 @@ PolicyFlow 是一个独立的 OpenAI 兼容代理，借鉴 [NadirClaw](https://g
   │     → 命中后确定任务类型（如"代码生成"、"复杂推理"）
   │
   ├── ③ 路由决策：根据任务类型选模型
-  │     写了 route_to → 直接用
-  │     没写 route_to → 按任务类型的 8 维权重对所有可用模型打分，Top-3 加权随机（90/7/3）
+  │     策略写了 route_to → 直接用
+  │     没写 route_to → 按任务类型的 8 维能力权重对所有可用模型打分，Top-3 加权随机（90/7/3）
   │     选定 model → 查 providers 映射 → 改写 model 字段 + 切对应 base_url
   │
   ├── ④ 级联验证（仅当策略 cascade: true）
-  │     便宜模型先答 → 规则验证器 / LLM Judge 评估
-  │     不通过 → 沿 escalation_chain 升级重试（最多 max_retries 次）
+  │     模型作答 → 规则验证器 / LLM Judge 评估
+  │     不通过 → 沿能力评分升一档重试（最多 max_retries 次）
   │
   └── ⑤ 成本记录   SQLite 写一行：策略命中、修饰器决策、最终模型、token、
                    费用、judge 反馈 —— 供 report / optimize 命令分析
 
 CLI 工具：
-  policyflow report   → 全屏 TUI 仪表盘
-  policyflow classify → 测试路由
-  policyflow optimize → AI 优化建议
-  policyflow export   → 导出日志
+  policyflow report   → 全屏 TUI 仪表盘(成本/策略/模型/日趋势)
+  policyflow classify → 测试路由("这句话会匹配到哪个策略?")
+  policyflow optimize → AI 优化建议(分析日志,推荐新策略)
+  policyflow export   → 导出 CSV 日志
 ```
 
 ## 快速开始
@@ -246,7 +295,7 @@ PolicyFlow 启动后同时暴露两个端点。接入就是填两个参数——
 | 协议 | URL | API Key | 哪些客户端用这个协议 |
 |---|---|---|---|
 | **OpenAI 兼容** | `http://localhost:8000/v1` | 任意字符串 | ChatBox、Cursor、Continue、OpenAI SDK、Codex CLI… |
-| **Anthropic 原生** | `http://localhost:8000` | 任意字符串 | Claude Code、Aider、OpenHands… |
+| **Anthropic 原生** | `http://localhost:8000` | 任意字符串 | Claude Code、Claude SDK 等 Anthropic 原生客户端 |
 
 > URL 为什么不一样？Anthropic 客户端自动拼 `/v1/messages`，所以填根路径；OpenAI 客户端自动拼 `/v1/chat/completions`，所以填 `/v1`。PolicyFlow 不校验 API Key——转发用的是 `.env` 里的供应商真实 Key。**两种协议走同一条路由管道**，Anthropic 请求在入口自动转格式，对用户透明。
 
@@ -584,6 +633,8 @@ modifiers:
 适合做 reasoning 的候选：`claude-opus-4-8`（最强）、`deepseek-r1`（性价比之王）、`o3-mini`、`qwen-max`、`glm-5.2`。两个目标模型可以分开配——比如 Agent 用 opus（工具调用稳）、reasoning 用 deepseek-r1（推理强且便宜）。
 
 ## 级联验证
+
+> 级联验证的设计理念源于 [NadirClaw](https://github.com/nadirclaw/nadirclaw)：回答发出后先验证质量，不通过则换更强的模型重试。PolicyFlow 在此基础上把容灾拆为三层独立机制，升级不再依赖静态链条，改为按能力评分逐档升。
 
 PolicyFlow 有三层独立的容灾/升级机制，各司其职：
 
