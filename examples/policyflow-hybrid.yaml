@@ -174,4 +174,4 @@ optimizer:
 
 # ── Logging ───────────────────────────────────────────────────────────
 logging:
-  log_prompt_preview: false
+  log_prompt_preview: true      # 默认开，AI 优化建议更精准；隐私敏感设 false

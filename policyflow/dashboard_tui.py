@@ -39,6 +39,22 @@ POLICY_PALETTE = ["#5faf5f", "#5f87af", "#afaf5f", "#af5faf",
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
+def _groove(hex_color: str) -> str:
+    """Darkened, desaturated version of a bar's fill color — used for the
+    unfilled 'groove'. Each bar gets a groove tinted by its own hue, so
+    adjacent rows stay visually distinct instead of merging into one slab."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    gray = (r + g + b) // 3
+    # Pull each channel most of the way toward a common dark gray, keeping a
+    # faint hue tint (≈18% of the original color).
+    base = 0.18
+    r = int((gray * 0.4 + r * 0.6) * base + 0x22 * (1 - base))
+    g = int((gray * 0.4 + g * 0.6) * base + 0x22 * (1 - base))
+    b = int((gray * 0.4 + b * 0.6) * base + 0x2a * (1 - base))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 def _si(val) -> int:
     try: return int(val)
     except (TypeError, ValueError): return 0
@@ -83,10 +99,10 @@ def _policy_table(policies: list[dict], bar_w: int) -> RichTable:
     t.add_column()
     if not policies: return t
     mx = max(p["cost"] for p in policies)
-    for i, p in enumerate(policies[:10]):
+    for i, p in enumerate(policies):
         style = POLICY_PALETTE[i % len(POLICY_PALETTE)]
         n = math.ceil(p["cost"] / mx * bar_w) if mx else 0
-        bar = Text("█" * n + "░" * (bar_w - n)); bar.stylize(style)
+        bar = Text(); bar.append("━" * n, style=style); bar.append("─" * (bar_w - n), style=_groove(style))
         t.add_row(
             p["policy"][:16],
             str(p["requests"]),
@@ -96,7 +112,8 @@ def _policy_table(policies: list[dict], bar_w: int) -> RichTable:
 
 
 def _model_table(model_rows: list, bar_w: int, label_w: int) -> RichTable:
-    """Cost-based bars: provider % of global, model % of provider."""
+    """Cost-based bars: both provider and model % are of the global total,
+    so a provider's models' percentages (and bar lengths) sum to the provider's."""
     t = RichTable.grid(padding=(0, 1))
     t.add_column(max_width=label_w + 4, overflow="ellipsis")
     t.add_column(justify="right", width=6)
@@ -124,7 +141,7 @@ def _model_table(model_rows: list, bar_w: int, label_w: int) -> RichTable:
         p_pct  = p_cost / total_cost_all * 100  # % of global
 
         n = math.ceil(p_cost / total_cost_all * bar_w)
-        bar = Text("█" * n + "░" * (bar_w - n)); bar.stylize(info["main"])
+        bar = Text(); bar.append("━" * n, style=info["main"]); bar.append("─" * (bar_w - n), style=_groove(info["main"]))
         t.add_row(
             f"[{info['main']}]{info['label']}[/]",
             str(p_req),
@@ -132,13 +149,58 @@ def _model_table(model_rows: list, bar_w: int, label_w: int) -> RichTable:
         )
         for j, m in enumerate(sorted(models, key=lambda x: x["cost"], reverse=True)):
             si = min(j, len(info["shades"]) - 1)
-            m_pct_of_provider = m["cost"] / max(p_cost, 0.001) * 100
+            m_pct_of_global = m["cost"] / total_cost_all * 100
             n2 = math.ceil(m["cost"] / total_cost_all * bar_w)
-            bar2 = Text("█" * n2 + "░" * (bar_w - n2)); bar2.stylize(info["shades"][si])
+            bar2 = Text(); bar2.append("━" * n2, style=info["shades"][si]); bar2.append("─" * (bar_w - n2), style=_groove(info["shades"][si]))
             t.add_row(
                 f"  {_shorten(m['model'], label_w)}",
                 str(m["cnt"]),
-                Text.assemble(bar2, f"  {m_pct_of_provider:.0f}%  ¥{m['cost']:.2f}"),
+                Text.assemble(bar2, f"  {m_pct_of_global:.0f}%  ¥{m['cost']:.2f}"),
+            )
+    return t
+
+
+def _capability_table(cap_rows: list[dict], bar_w: int, label_w: int) -> RichTable:
+    """Auto-routing breakdown: task type (from 'capability(<task>)') → which
+    model the system picked, with request count and cost. Shows a hint when
+    there's no capability-routed data yet."""
+    t = RichTable.grid(padding=(0, 1))
+    t.add_column(max_width=label_w + 4, overflow="ellipsis")
+    t.add_column(justify="right", width=6)
+    t.add_column()
+    if not cap_rows:
+        t.add_row(Text("(暂无自动选模数据 — 启用 capability 模式后出现)", style="dim"), "", "")
+        return t
+
+    # Group rows by task type extracted from 'capability(<task>)'.
+    groups: dict[str, list[dict]] = {}
+    for r in cap_rows:
+        m = r["method"]
+        task = m[len("capability("):-1] if m.startswith("capability(") and m.endswith(")") else m
+        groups.setdefault(task, []).append(r)
+
+    total_cost_all = sum(r["cost"] for r in cap_rows) or 1
+    sorted_g = sorted(groups.items(), key=lambda kv: sum(r["cost"] for r in kv[1]), reverse=True)
+
+    for task, models in sorted_g:
+        g_cost = sum(r["cost"] for r in models)
+        g_req = sum(r["requests"] for r in models)
+        g_pct = g_cost / total_cost_all * 100
+        n = math.ceil(g_cost / total_cost_all * bar_w)
+        bar = Text(); bar.append("━" * n, style="#ff922b"); bar.append("─" * (bar_w - n), style=_groove("#ff922b"))
+        t.add_row(
+            f"[#ff922b]{task[:label_w + 2]}[/]",
+            str(g_req),
+            Text.assemble(bar, f"  {g_pct:.0f}%  ¥{g_cost:.2f}"),
+        )
+        for m in sorted(models, key=lambda x: x["cost"], reverse=True):
+            m_pct = m["cost"] / total_cost_all * 100
+            n2 = math.ceil(m["cost"] / total_cost_all * bar_w)
+            bar2 = Text(); bar2.append("━" * n2, style="#d4641a"); bar2.append("─" * (bar_w - n2), style=_groove("#d4641a"))
+            t.add_row(
+                f"  {_shorten(m['routed_model'], label_w)}",
+                str(m["requests"]),
+                Text.assemble(bar2, f"  {m_pct:.0f}%  ¥{m['cost']:.2f}"),
             )
     return t
 
@@ -164,8 +226,8 @@ def _daily_table(daily: list[dict], bar_w: int) -> tuple[Text, RichTable | None]
     hdr.add_column()
 
     legend = Text()
-    legend.append("█", style="#7fc77f"); legend.append(" Actual  ", style="dim")
-    legend.append("█", style="#aaaaaa"); legend.append(" Baseline  ", style="dim")
+    legend.append("━━", style="#7fc77f"); legend.append(" Actual  ", style="dim")
+    legend.append("━━", style="#aaaaaa"); legend.append(" Baseline  ", style="dim")
     legend.append(f"Total ¥{total_ac:.2f} vs ¥{total_cc:.2f}  ", style="dim")
     legend.append(f"Saved ¥{saved:+.2f}", style="green" if saved > 0 else "red")
     hdr.add_row("", legend, Text(""), Text(""))
@@ -191,14 +253,14 @@ def _daily_table(daily: list[dict], bar_w: int) -> tuple[Text, RichTable | None]
 
         if na >= nc:
             bar = Text()
-            bar.append("█" * shared, style="#aaaaaa")
-            bar.append("█" * (na - shared), style="#7fc77f")
-            bar.append("░" * (bar_w - na))
+            bar.append("━" * shared, style="#aaaaaa")
+            bar.append("━" * (na - shared), style="#7fc77f")
+            bar.append("─" * (bar_w - na), style="#444444")
         else:
             bar = Text()
-            bar.append("█" * shared, style="#7fc77f")
-            bar.append("█" * (nc - shared), style="#aaaaaa")
-            bar.append("░" * (bar_w - nc))
+            bar.append("━" * shared, style="#7fc77f")
+            bar.append("━" * (nc - shared), style="#aaaaaa")
+            bar.append("─" * (bar_w - nc), style="#444444")
 
         if diff > 0:
             label = Text(f"+¥{diff:.2f}", style="green")
@@ -236,17 +298,25 @@ class PolicyFlowDashboard(App):
     """Full-page scroll dashboard — all content in one VerticalScroll."""
 
     CSS = """
-    Screen { background: #000000; }
+    Screen { background: #1c1c22; }
 
     #header {
         dock: top;
         height: auto;
         padding: 1 2;
-        border: solid #3a4a5a;
-        background: #0a0a14;
+        border: solid #ff922b;
+        background: #1c1c22;
     }
-    #header Static {
-        color: #aaccee;
+    #header-icon {
+        width: auto;
+        height: auto;
+        margin-right: 2;
+        color: #ff922b;
+    }
+    #header-title {
+        width: auto;
+        height: auto;
+        color: #ff922b;
     }
 
     #page {
@@ -271,6 +341,7 @@ class PolicyFlowDashboard(App):
         height: auto; margin-top: 1;
     }
     #model-card    { border: solid #4a3a4a; }
+    #capability-card { border: solid #4a4a3a; }
     #daily-card    { border: solid #4a4a3a; }
     #optimize-card { border: solid #3a4a4a; }
     #recent-card   { border: solid #3a3a3a; }
@@ -301,11 +372,11 @@ class PolicyFlowDashboard(App):
     /* ── DataTable ──────────────────────────────────── */
     #recent-table { height: 12; }
     DataTable > .datatable--header {
-        background: #1a1a1a;
+        background: #1c1c22;
         color: #666666;
         text-style: bold;
     }
-    DataTable > .datatable--cursor { background: #2a2a44; }
+    DataTable > .datatable--cursor { background: #33334a; }
     """
 
     BINDINGS = [
@@ -321,8 +392,26 @@ class PolicyFlowDashboard(App):
 
     def compose(self) -> ComposeResult:
         from rich.text import Text as Rt
-        banner = Rt(pyfiglet.figlet_format("PolicyFlow", font="big"), style="bold cyan")
-        yield Static(banner, id="header")
+        # Mascot: a solid-block octopus — one head, many tentacles fanning out,
+        # echoing PolicyFlow's "one request → routed to many models" theme.
+        # Lines shaded light→deep orange for a warm, Claude-CLI-style gradient.
+        octo_lines = [
+            ("   ▄█████████▄",   "#ffd9a0"),
+            ("  ███████████",    "#ffc06a"),
+            ("  ██ ▀█ █▀ ██",    "#ffaa3c"),
+            ("  ███████████",    "#ff922b"),
+            ("   ▀███████▀",     "#f57c1f"),
+            ("   ▟▌▐█▌▐█▌▐▙",    "#e8701c"),
+            ("  ▟▘▟▘ █ ▝▙▝▙",    "#d4641a"),
+        ]
+        octopus = Rt()
+        for i, (line, color) in enumerate(octo_lines):
+            octopus.append(line + "\n", style=f"bold {color}")
+
+        banner = Rt(pyfiglet.figlet_format("PolicyFlow", font="big"), style="bold #ff922b")
+        with Horizontal(id="header"):
+            yield Static(octopus, id="header-icon")
+            yield Static(banner, id="header-title")
 
         with VerticalScroll(id="page"):
             # ── Row 1: Stats + Policy ────────────────────
@@ -339,6 +428,11 @@ class PolicyFlowDashboard(App):
             with VerticalScroll(id="model-card", classes="section"):
                 yield Static("MODEL USAGE BY PROVIDER", classes="card-title")
                 yield Static("", id="model-body", classes="card-body")
+
+            # ── Auto-Routing (capability mode) ───────────
+            with VerticalScroll(id="capability-card", classes="section"):
+                yield Static("AUTO-ROUTING BY TASK TYPE", classes="card-title")
+                yield Static("", id="capability-body", classes="card-body")
 
             # ── Daily Cost Comparison ────────────────────
             with Vertical(id="daily-card", classes="section"):
@@ -374,6 +468,7 @@ class PolicyFlowDashboard(App):
         cascade  = db_module.query_cascade_stats(days)
         daily    = db_module.query_daily_costs(days)
         recent   = db_module.query_recent_requests(50)
+        capability = db_module.query_capability_breakdown(days)
 
         conn = db_module.get_db()
         model_rows = conn.execute(
@@ -395,6 +490,7 @@ class PolicyFlowDashboard(App):
         self.query_one("#stats-body",  Static).update(_stats_table(summary, cascade))
         self.query_one("#policy-body", Static).update(_policy_table(policies, bar_w))
         self.query_one("#model-body",  Static).update(_model_table(model_rows, bar_w, label_w))
+        self.query_one("#capability-body", Static).update(_capability_table(capability, bar_w, label_w))
 
         # Daily chart — legend fixed + rows scrollable
         daily_hdr, daily_body = _daily_table(daily, bar_w + 20)

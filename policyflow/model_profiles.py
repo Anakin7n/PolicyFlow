@@ -475,3 +475,39 @@ def select_best_model(
     scored = [(score_model(p, weights, budget_weight), m) for m, p in candidates]
     scored.sort(reverse=True)
     return scored[0][1]
+
+
+def next_stronger_model(
+    specialty: str,
+    current_model: str,
+    available_models: list[str],
+) -> str | None:
+    """Pick the next escalation target by pure capability (ignoring price).
+
+    Cascade escalation happens only after a cheaper model has already failed,
+    so cost is irrelevant here — we want the model that does the job best.
+    Ranks available models by capability for this task (budget_weight=0) and
+    returns the one ranked just ABOVE current_model — a single step up, not a
+    jump to the strongest, so escalation stays gradual.
+
+    Returns None if current_model is already the strongest, or if the task /
+    models are unknown (caller should then fall back to its static chain).
+    """
+    weights = TASK_WEIGHTS.get(specialty)
+    if not weights:
+        return None
+    ranked = sorted(
+        (
+            (score_model(PROFILES[m], weights, budget_weight=0.0), m)
+            for m in available_models
+            if m in PROFILES
+        ),
+        reverse=True,
+    )  # strongest first
+    models = [m for _, m in ranked]
+    if current_model not in models:
+        # Current model unknown/unscored — escalate to the strongest available.
+        return models[0] if models else None
+    idx = models.index(current_model)
+    # The model just above current in capability is at idx-1 (list is desc).
+    return models[idx - 1] if idx > 0 else None

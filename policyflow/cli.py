@@ -27,9 +27,23 @@ from rich import box
 console = Console(highlight=False)
 
 
-def _logo() -> str:
-    """Big ASCII logo via pyfiglet."""
-    return pyfiglet.figlet_format("PolicyFlow", font="big")
+def _logo() -> Text:
+    """Octopus mascot + big ASCII logo, orange gradient (matches the dashboard)."""
+    octo_lines = [
+        ("   ▄█████████▄",   "#ffd9a0"),
+        ("  ███████████",    "#ffc06a"),
+        ("  ██ ▀█ █▀ ██",    "#ffaa3c"),
+        ("  ███████████",    "#ff922b"),
+        ("   ▀███████▀",     "#f57c1f"),
+        ("   ▟▌▐█▌▐█▌▐▙",    "#e8701c"),
+        ("  ▟▘▟▘ █ ▝▙▝▙",    "#d4641a"),
+    ]
+    out = Text()
+    for line, color in octo_lines:
+        out.append(line + "\n", style=f"bold {color}")
+    out.append("\n")
+    out.append(pyfiglet.figlet_format("PolicyFlow", font="big"), style="bold #ff922b")
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -127,7 +141,7 @@ def main() -> None:
 
 def cmd_serve(args) -> None:
     import uvicorn
-    console.print(_logo(), style="bold cyan")
+    console.print(_logo())
     console.print("  Poli the Route-Owl   |   v0.5.0   |   策略路由中间件")
     console.print(f"  [cyan]http://{args.host}:{args.port}[/cyan]")
     console.print(f"  [dim]API Docs: http://{args.host}:{args.port}/docs[/dim]")
@@ -193,7 +207,7 @@ def cmd_classify(args) -> None:
             )
             decision = await router.route(req)
 
-            console.print(_logo(), style="bold cyan")
+            console.print(_logo())
             console.print("  [bold cyan]路由测试[/bold cyan]\n")
 
             table = Table(box=box.SIMPLE, border_style="dim", show_header=False)
@@ -260,7 +274,7 @@ def cmd_optimize(args) -> None:
     proxy = UpstreamProxy(config)
 
     async def _run():
-        console.print(_logo(), style="bold cyan")
+        console.print(_logo())
         console.print("  [bold cyan]AI 优化分析[/bold cyan]\n")
         console.print("  [dim]正在分析日志数据...[/dim]\n")
 

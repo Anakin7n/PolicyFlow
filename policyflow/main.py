@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
                 ))],
             )
             try:
-                jr = await proxy.chat_completion(judge_req)
+                jr, _ = await proxy.chat_completion_with_fallback(judge_req)
                 text = (jr.choices[0].message.content or "").strip()
                 passed = text.upper().startswith("PASS")
                 reason = "" if passed else text[5:].strip()[:200] if text.startswith("FAIL") else text[:200]
@@ -170,6 +170,7 @@ async def anthropic_messages(
                 "method": route_method, "score": route_score,
                 "success": success, "prompt_hash": prompt_hash_val,
                 "prompt_preview": prompt_preview_val,
+                "baseline_model": config.baseline_model,
             }
             wrapped = _stream_with_logging(sse_stream, log_params)
             return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score)
@@ -178,8 +179,12 @@ async def anthropic_messages(
             raise
     else:
         try:
+            from .policy import PolicyEngine
+            cascade_specialty = (
+                PolicyEngine._infer_specialty(decision.policy) if decision.policy else ""
+            )
             response, cascade_attempts, judge_reason_val = await _forward_with_cascade(
-                proxy, cascade, openai_req,
+                proxy, cascade, openai_req, cascade_specialty, available_models,
             )
         except HTTPException:
             success = False
@@ -203,6 +208,7 @@ async def anthropic_messages(
                 prompt_hash=prompt_hash_val,
                 prompt_preview=prompt_preview_val,
                 judge_reason=judge_reason_val,
+                baseline_model=config.baseline_model,
             )
 
         # Convert OpenAI response → Anthropic format
@@ -309,12 +315,17 @@ async def chat_completions(
                 "method": route_method, "score": route_score,
                 "success": success, "prompt_hash": prompt_hash_val,
                 "prompt_preview": prompt_preview_val,
+                "baseline_model": config.baseline_model,
             }
             wrapped = _stream_with_logging(raw_stream, log_params)
             return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score)
         else:
+            from .policy import PolicyEngine
+            cascade_specialty = (
+                PolicyEngine._infer_specialty(decision.policy) if decision.policy else ""
+            )
             response, cascade_attempts, judge_reason_val = await _forward_with_cascade(
-                proxy, cascade, request
+                proxy, cascade, request, cascade_specialty, available_models,
             )
     except HTTPException:
         success = False
@@ -339,6 +350,7 @@ async def chat_completions(
             prompt_hash=prompt_hash_val,
             prompt_preview=prompt_preview_val,
             judge_reason=judge_reason_val,
+            baseline_model=config.baseline_model,
         )
 
     # Return non-streaming response with PolicyFlow routing headers
@@ -366,6 +378,7 @@ def _log_to_db(
     prompt_hash: str = "",
     prompt_preview: str = "",
     judge_reason: str = "",
+    baseline_model: str = "deepseek-v4-pro",
 ) -> None:
     """Record the request and its costs to SQLite."""
     prompt_tokens = 0
@@ -376,7 +389,7 @@ def _log_to_db(
         completion_tokens = response.usage.completion_tokens
 
     estimated_cost = calc_cost(routed_model, prompt_tokens, completion_tokens)
-    compared_cost = calc_compared_cost(prompt_tokens, completion_tokens)
+    compared_cost = calc_compared_cost(prompt_tokens, completion_tokens, baseline_model)
 
     try:
         db.log_request(
@@ -405,10 +418,14 @@ async def _forward_with_cascade(
     proxy: UpstreamProxy,
     cascade: CascadeValidator,
     request: ChatCompletionRequest,
+    specialty: str = "",
+    available_models: list[str] | None = None,
 ) -> tuple[ChatCompletionResponse, int, str]:
     """Forward request with cascade escalation on validation failure.
 
-    Returns (response, cascade_attempts, judge_reason).
+    When ``specialty`` and ``available_models`` are given, escalation picks the
+    next model up by pure capability; otherwise it falls back to the static
+    escalation_chain. Returns (response, cascade_attempts, judge_reason).
     """
     max_attempts = cascade.config.max_retries + 1
     cascade_attempts = 0
@@ -430,7 +447,7 @@ async def _forward_with_cascade(
             response, provider_name = await proxy.chat_completion_with_fallback(request)
         except ProxyError as e:
             logger.warning("Upstream error (attempt %d): %s", attempt + 1, e)
-            next_model = cascade.get_next_model(current_model)
+            next_model = cascade.get_next_model(current_model, specialty, available_models)
             if next_model and attempt < max_attempts - 1:
                 request.model = next_model
                 cascade_attempts += 1
@@ -446,7 +463,7 @@ async def _forward_with_cascade(
                     "Cascade fail [%s]: %s → escalating (attempt %d/%d)",
                     validation.reason, current_model, attempt + 1, max_attempts,
                 )
-                next_model = cascade.get_next_model(current_model)
+                next_model = cascade.get_next_model(current_model, specialty, available_models)
                 if not next_model or attempt >= max_attempts - 1:
                     logger.warning("Cascade exhausted, returning last response from %s", current_model)
                     return response, cascade_attempts, judge_reason
@@ -474,7 +491,7 @@ async def _forward_with_cascade(
                     "Judge FAIL [%s]: %s → escalating (attempt %d/%d)",
                     judge_reason, current_model, attempt + 1, max_attempts,
                 )
-                next_model = cascade.get_next_model(current_model)
+                next_model = cascade.get_next_model(current_model, specialty, available_models)
                 if not next_model or attempt >= max_attempts - 1:
                     logger.warning("Cascade exhausted, returning last response from %s", current_model)
                     return response, cascade_attempts, judge_reason
@@ -521,7 +538,10 @@ async def _stream_with_logging(
             estimated_cost = calc_cost(
                 log_params["routed_model"], prompt_tokens, completion_tokens,
             )
-            compared_cost = calc_compared_cost(prompt_tokens, completion_tokens)
+            compared_cost = calc_compared_cost(
+                prompt_tokens, completion_tokens,
+                log_params.get("baseline_model", "deepseek-v4-pro"),
+            )
             db.log_request(
                 user=log_params.get("user", "default"),
                 original_model=log_params.get("original_model", ""),

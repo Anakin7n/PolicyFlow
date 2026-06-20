@@ -171,14 +171,33 @@ class CascadeValidator:
             return False
         return True
 
-    def get_next_model(self, current_model: str) -> str | None:
-        """Get the next model in the escalation chain."""
+    def get_next_model(
+        self,
+        current_model: str,
+        specialty: str = "",
+        available_models: list[str] | None = None,
+    ) -> str | None:
+        """Get the next escalation target.
+
+        Preferred path (capability escalation): when a task type and the set
+        of available models are known, escalate to the next model UP by pure
+        capability — one step stronger than current, price ignored (the cheap
+        model already failed, so quality is what matters now).
+
+        Fallback path: the static escalation_chain from config (used when
+        capability info is unavailable or yields nothing).
+        """
+        if specialty and available_models:
+            from .model_profiles import next_stronger_model
+            nxt = next_stronger_model(specialty, current_model, available_models)
+            if nxt:
+                return nxt
+        # Static chain fallback
         try:
             idx = self.config.escalation_chain.index(current_model)
             if idx + 1 < len(self.config.escalation_chain):
                 return self.config.escalation_chain[idx + 1]
         except ValueError:
-            # Current model not in chain — start from the beginning
             if self.config.escalation_chain:
                 return self.config.escalation_chain[0]
         return None

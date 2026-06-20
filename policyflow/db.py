@@ -246,7 +246,27 @@ def query_recent_requests(limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-# ── Query helpers for AI optimizer ───────────────────────────────
+def query_capability_breakdown(days: int = 30) -> list[dict]:
+    """For capability-routed requests (method = 'capability(<task>)'), break
+    down by task type → which model the system auto-selected, with counts/cost.
+
+    Returns rows: {method, routed_model, requests, cost}. Empty when no
+    capability routing has happened yet (e.g. all policies use route_to).
+    """
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT method, routed_model,
+                  COUNT(*) as requests,
+                  COALESCE(SUM(estimated_cost), 0) as cost
+           FROM requests
+           WHERE timestamp >= date('now', ? || ' days')
+             AND method LIKE 'capability(%'
+           GROUP BY method, routed_model
+           ORDER BY method, cost DESC""",
+        (f"-{days}",),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 def query_policy_stats(days: int = 30) -> list[dict]:
     """Per-policy statistics for the AI optimizer."""

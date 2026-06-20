@@ -1,6 +1,7 @@
 @echo off
+chcp 65001 >nul
 REM ============================================================
-REM  PolicyFlow — one-click launcher
+REM  PolicyFlow - one-click launcher
 REM ============================================================
 cd /d "%~dp0\.."
 if exist ".venv\Scripts\activate.bat" (call .venv\Scripts\activate.bat) else (
@@ -15,18 +16,18 @@ if not defined ROUTING_MODE set ROUTING_MODE=
 :menu
 cls
 echo.
-echo   +------------------------------------------+
-echo   ^|          PolicyFlow Launcher              ^|
-echo   +------------------------------------------+
+python -c "from policyflow.cli import console,_logo; console.print(_logo())"
+echo.
+echo   +==========================================+
 echo   ^|                                          ^|
-echo   ^|  [1] Dashboard   Full TUI report         ^|
-echo   ^|  [2] Serve       Start proxy             ^|
-echo   ^|  [3] Classify    Test routing            ^|
+echo   ^|   [1]  Dashboard    Full TUI report      ^|
+echo   ^|   [2]  Serve        Start proxy          ^|
+echo   ^|   [3]  Classify     Test routing         ^|
 if "%ROUTING_MODE%"=="" (set DISPLAY_MODE=default) else (set DISPLAY_MODE=%ROUTING_MODE%)
-echo   ^|  [4] Mode: %DISPLAY_MODE%                            ^|
-echo   ^|  [Q] Quit                                 ^|
+echo   ^|   [4]  Mode: %DISPLAY_MODE%
+echo   ^|   [Q]  Quit                              ^|
 echo   ^|                                          ^|
-echo   +------------------------------------------+
+echo   +==========================================+
 echo.
 choice /c 1234Q /n /m "  Select [1-4 or Q]: "
 set CH=%errorlevel%
@@ -71,17 +72,18 @@ pause
 goto :menu
 
 :mode
+cls
 echo.
-echo   +------------------------------------------+
-echo   ^|  Routing Mode                             ^|
-echo   +------------------------------------------+
+echo   +==========================================+
+echo   ^|   Routing Mode                           ^|
+echo   +==========================================+
 echo   ^|                                          ^|
-echo   ^|  [H] hybrid     Each policy decides       ^|
-echo   ^|  [E] explicit   You pick every model      ^|
-echo   ^|  [C] capability Algorithm picks best      ^|
-echo   ^|  [N] default    Use YAML setting          ^|
+echo   ^|   [H]  hybrid       Each policy decides  ^|
+echo   ^|   [E]  explicit     You pick every model ^|
+echo   ^|   [C]  capability   Algorithm picks best ^|
+echo   ^|   [N]  default      Use YAML setting      ^|
 echo   ^|                                          ^|
-echo   +------------------------------------------+
+echo   +==========================================+
 echo.
 choice /c HECN /n /m "  Choose mode [H, E, C, or N for YAML default]: "
 set MC=%errorlevel%

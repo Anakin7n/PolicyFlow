@@ -254,6 +254,28 @@ class Config:
         # Fallback for old configs that only have "policies"
         return self.data.get("policies", [])
 
+    @property
+    def baseline_model(self) -> str:
+        """The cost-comparison baseline: what a request would cost if we did
+        NOT route — i.e. sent everything to the most expensive model on hand.
+
+        Defined purely by cost, independent of routing: the available model
+        (provider with a real key) with the highest weighted average price.
+        Routing to anything cheaper then shows up as a saving, in any mode.
+        (Same idea as NadirClaw's savings baseline.)
+
+        Falls back to 'deepseek-v4-pro' if no model is available.
+        """
+        from .cost import _lookup_price
+        best, best_cost = None, -1.0
+        for model in self.available_models:
+            ip, op = _lookup_price(model)
+            avg = (ip * 3 + op) / 4  # weighted, matches cost-tier convention
+            if avg > best_cost:
+                best, best_cost = model, avg
+        return best or "deepseek-v4-pro"
+
+
     # ── Cascade ────────────────────────────────────────────────────
 
     @property
@@ -264,7 +286,7 @@ class Config:
 
     @property
     def log_prompt_preview(self) -> bool:
-        return bool(self.data.get("logging", {}).get("log_prompt_preview", False))
+        return bool(self.data.get("logging", {}).get("log_prompt_preview", True))
 
     # ── Optimizer ─────────────────────────────────────────────────
 

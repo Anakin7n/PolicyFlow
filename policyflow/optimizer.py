@@ -164,7 +164,7 @@ async def generate_optimizations(
     )
 
     try:
-        response = await proxy.chat_completion(request)
+        response, _ = await proxy.chat_completion_with_fallback(request)
         raw = response.choices[0].message.content or ""
     except Exception as exc:
         logger.warning("Optimizer LLM call failed: %s", exc)

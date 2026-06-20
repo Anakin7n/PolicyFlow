@@ -119,10 +119,11 @@ providers:
 | `policies_hybrid` | hybrid 模式下的策略集，可混用写死模型和算法选模 |
 | `policies_capability` | capability 模式下的策略集，全由算法选模 |
 | `policies_explicit` | explicit 模式下的策略集，全写死模型 |
-| `cascade` | 级联验证：验证方式、升级链条、最大重试次数 |
+| `cascade` | 级联验证：验证方式、升级链条、最大重试次数。若启用 LLM 裁判，`judge_model` 必须已在 `providers` 中配了真实 Key |
 | `cost_tiers` | `max_cost_tier` 的分档边界（可选，省略用默认 cheap<1.0、mid<5.0） |
 | `modifiers` | 四个修饰器的开关 + `strongest_model` / `reasoning_model` 目标模型（详见下方"智能修饰器"节） |
-| `optimizer` | AI 优化引擎：是否启用、用哪个模型分析、最多几条建议 |
+| `optimizer` | AI 优化引擎：是否启用、用哪个模型分析、最多几条建议。所用模型必须已在 `providers` 中配了真实 Key |
+| `logging` | `log_prompt_preview` 是否记录提问原文（默认 `true`，利于优化建议；隐私敏感设 `false`，详见"AI 优化引擎"节） |
 
 ### Embedding 供应商配置
 
@@ -599,11 +600,24 @@ cascade:
   enabled: true
   verifier: rule_then_llm     # rule_only | llm_judge | rule_then_llm
   judge_model: deepseek-v4-flash
-  escalation_chain:
+  max_retries: 2              # 最多升级几次
+  escalation_chain:           # 静态升级链（兜底用，见下）
     - "deepseek-v4-flash"
     - "deepseek-v4-pro"
-    - "claude-sonnet-4-6"
+    - "deepseek-r1"
 ```
+
+> **`judge_model` 的 API Key 从哪来？** 从 `providers` 段自动查找（和路由请求走同一套 provider 容灾逻辑）。因此 `judge_model` **必须是某个 provider 里声明的模型、且该 provider 配了真实 Key**，否则裁判调用会因为找不到凭证而失败。
+
+### 升级到哪个模型？——按能力评分逐档升
+
+验证不通过时，PolicyFlow **优先按模型能力评分**选下一个升级目标，而不是照搬静态链：
+
+- **纯能力排序，不看价格**。日常路由会用 30% 的价格权重来省钱，但级联升级只在便宜模型已经失败后才发生——这时诉求是"把事做对"，不是省钱。所以升级阶段价格权重归零，只比谁更能胜任当前任务类型。
+- **升一档，不直接拉满**。从"能力高于当前模型"的可用模型里，选评分最接近的**下一档**，逐步试探；配合 `max_retries` 可多次升级，避免一道小坎就动用最贵的旗舰。
+- **和 capability 选模同源**。无论当前模型是策略写死的（`route_to`）还是系统自选的，升级都用同一套能力评分体系，不会出现"升级反而换到更弱模型"的情况。
+
+> `escalation_chain` 退化为**兜底**：仅当任务类型无法识别、或可用模型不在能力库中时，才回退到这条手写链。正常情况下你不需要精心维护它。
 
 Judge 失败原因会写入数据库，供 AI 优化引擎分析——不只是知道"升级率高"，还能知道"47% 是因为编造不存在的 API 参数"。
 
@@ -631,6 +645,22 @@ $ python -m policyflow optimize --since 30d
   📊 汇总: 执行以上建议，预计每月节省 ¥29.00
 ```
 
+> **`optimizer.model` 的 API Key 从哪来？** 和级联裁判一样，从 `providers` 段自动查找并走 provider 容灾。**必须用 `providers` 里声明了且配了真实 Key 的模型**，否则 optimize 命令会报错。
+
+### 提问原文与隐私（`logging.log_prompt_preview`）
+
+优化引擎要给出"未匹配请求该建什么策略"的精准建议，依赖请求原文。该行为由 `policyflow.yaml` 的 `logging` 段控制：
+
+```yaml
+logging:
+  log_prompt_preview: true   # 默认开：存用户提问原文前 500 字
+```
+
+- **`true`（默认）** — 记录每条请求原文的前 500 字。优化引擎能看到"这 823 条未匹配请求都在问天气/闲聊"，从而给出可直接套用的策略建议；`report` 仪表盘的最近请求列表也能显示原文。
+- **`false`** — 不存原文，只存原文的哈希（`prompt_hash`，始终记录）。**成本、策略、模型、省钱等所有统计照常不受影响**；唯独优化引擎只能知道"有多少条同类请求未匹配"，说不出它们具体在问什么，建议质量下降。
+
+> 多用户、对外服务或合规敏感场景，建议设为 `false` 保护用户隐私。
+
 ## 响应头追踪
 
 每次请求的响应头包含路由信息：
@@ -645,7 +675,7 @@ X-PolicyFlow-Score: 1.000
 
 ## 成本计算
 
-内置 39 个模型的官方定价（2026-06），成本对比基准为 DeepSeek V4 Pro（国产热门、价格适中）：
+内置 39 个模型的官方定价（2026-06）。成本对比基准（baseline）= **当前可用模型中最贵的那个**——代表"假如不路由、把所有请求都丢给手头最强的模型"的花费，路由到任何更便宜的模型都体现为节省：
 
 | 厂商 | 模型 |
 |------|------|
@@ -660,7 +690,9 @@ X-PolicyFlow-Score: 1.000
 | 百度文心 | ERNIE 5.1 / 4.5 Turbo / Speed Pro |
 | MiniMax | M3 / M2.7 |
 
-报告对比公式：`实际花费` vs `如果全用 deepseek-v4-pro 的花费`。金额单位为人民币（¥）。
+报告对比公式：`实际花费` vs `如果全用 baseline 模型的花费`。金额单位为人民币（¥）。
+
+**baseline 怎么定？** 纯按成本、与路由逻辑无关：自动取**可用模型中加权均价最贵的那个**（从 `available_models` 筛选，只含配了真实 Key 的供应商）；若没有任何可用模型，兜底 `deepseek-v4-pro`。代表"假如不路由、全用手头最强模型"的花费，所以路由到任何更便宜的模型都体现为节省，hybrid / capability / explicit 三种模式通用。
 
 ## 项目结构
 

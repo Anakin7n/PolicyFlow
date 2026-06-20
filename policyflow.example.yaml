@@ -31,20 +31,22 @@ providers:
       - "qwen3-235b-a22b"
       - "qwen-vl-plus"
 
-  glm:
-    base_url: https://open.bigmodel.cn/api/paas/v4
-    api_key: "${ZHIPU_API_KEY}"
+  # 火山 Coding Plan（Agent 订阅计划，可调用多厂商模型）
+  # 排在 minimax/doubao/glm/kimi 前面 → 这些模型优先走 Coding Plan；额度用完/挂了自动 fallback 到各自官方
+  # deepseek 系不放这里，统一走 deepseek 官方。没有订阅 Coding Plan 的删掉这个 provider 即可。
+  volc-coding:
+    base_url: https://ark.cn-beijing.volces.com/api/coding/v3
+    api_key: "${VOLC_CODING_KEY}"
     models:
-      - "glm-5"
-      - "glm-5.1"
-      # glm-5.2 在 volc-coding 段也声明了，按 yaml 顺序 volc-coding 优先
-
-  kimi:
-    base_url: https://api.moonshot.cn/v1
-    api_key: "${KIMI_API_KEY}"
-    models:
-      - "kimi-k2.6"
+      - "doubao-seed-2.0-code"
+      - "doubao-seed-2.0-pro"
+      - "doubao-seed-2.0-lite"
+      - "doubao-seed-code"
+      - "glm-5.2"
       - "kimi-k2.7-code"
+      - "kimi-k2.6"
+      - "minimax-m3"
+      - "minimax-m2.7"
 
   minimax:
     base_url: https://api.minimax.io/v1
@@ -64,16 +66,20 @@ providers:
       - "doubao-seed-2.0-pro"
       - "doubao-seed-code"
 
-  # 火山 Coding Plan（Agent 订阅计划，可调用多厂商模型）
-  # 排在 glm 前面 → 相同的 glm-5.2 优先走 Coding Plan；没配 key 或挂了自动 fallback 到 glm
-  # 没有订阅 Coding Plan 的删掉这个 provider 即可。
-  volc-coding:
-    base_url: https://ark.cn-beijing.volces.com/api/coding/v3
-    api_key: "${VOLC_CODING_KEY}"
+  glm:
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key: "${ZHIPU_API_KEY}"
     models:
-      - "glm-5.2"
-      - "deepseek-r1"
-      - "deepseek-v4-pro"
+      - "glm-5"
+      - "glm-5.1"
+      # glm-5.2 已通过 volc-coding 调，此处不重复
+
+  kimi:
+    base_url: https://api.moonshot.cn/v1
+    api_key: "${KIMI_API_KEY}"
+    models:
+      - "kimi-k2.6"
+      - "kimi-k2.7-code"
 
   ernie:
     base_url: https://qianfan.baidubce.com/v2
@@ -126,7 +132,7 @@ upstream:
 embedding:
   base_url: https://ark.cn-beijing.volces.com/api/v3
   api_key: "${EMBEDDING_API_KEY}"
-  model: doubao-embedding-vision-250615
+  model: doubao-embedding-vision-251215
   similarity_threshold: 0.5    # 全局语义匹配阈值（与 verify_threshold 一致）
   verify_threshold: 0.5        # 关键词命中后的复核阈值（避免"苹果手机"误中"苹果"水果策略）
   timeout: 30
@@ -534,7 +540,7 @@ policies_explicit:
 cascade:
   enabled: true
   verifier: rule_only           # rule_only=纯规则 / llm_judge=AI裁判 / rule_then_llm=先规则再AI
-  judge_model: ""               # 如果用 AI 裁判，指定哪个模型当裁判（空=不用）
+  judge_model: ""               # AI 裁判模型（空=不用）。⚠ 必须已在 providers 中配了真实 Key
   judge_prompt_template: ""     # 自定义裁判提示词（空=用默认）
   max_retries: 2                # 最多升级几次
   escalation_chain:             # 升级链条，从便宜到贵
@@ -546,14 +552,14 @@ cascade:
 # 日志 — 记录每次路由决策到 SQLite，用于仪表盘和 AI 优化。
 # ══════════════════════════════════════════════════════════════════════
 logging:
-  log_prompt_preview: false     # 是否存用户提问原文（关=保护隐私）
+  log_prompt_preview: true      # 存用户提问原文前 500 字（默认开，AI 优化建议更精准）。多用户/合规敏感场景设 false 保护隐私
 
 # ══════════════════════════════════════════════════════════════════════
 # AI 优化引擎 — 分析历史日志，自动生成策略改进建议。
 # ══════════════════════════════════════════════════════════════════════
 optimizer:
   enabled: true
-  model: deepseek-v4-flash      # 用哪个便宜模型分析（不贵）
+  model: deepseek-v4-flash      # 用哪个模型分析。⚠ 必须已在 providers 中配了真实 Key
   max_suggestions: 5            # 最多给几条建议
 
 # ══════════════════════════════════════════════════════════════════════
@@ -566,5 +572,5 @@ modifiers:
   context_window_filter: true   # 输入超模型窗口 → 自动换大窗口模型
   session_persistence: true     # 同一会话固定用一个模型
   session_ttl: 1800             # 会话保持时间（秒），默认 30 分钟
-  strongest_model: "auto"               # Agent 检测的目标模型，"auto"=从可用模型选 Agent 能力+性价比最优
-  reasoning_model: "auto"               # 推理检测的目标模型，"auto"=从可用模型选推理能力+性价比最优
+  strongest_model: "auto"       # Agent 检测的目标模型，"auto"=从可用模型选 Agent 能力+性价比最优
+  reasoning_model: "auto"       # 推理检测的目标模型，"auto"=从可用模型选推理能力+性价比最优
