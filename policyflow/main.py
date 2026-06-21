@@ -164,10 +164,7 @@ async def anthropic_messages(
             raise
     else:
         try:
-            from .policy import PolicyEngine
-            cascade_specialty = (
-                PolicyEngine._infer_specialty(decision.policy) if decision.policy else ""
-            )
+            cascade_specialty = decision.policy.name if decision.policy else ""
             response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
                 proxy, cascade, openai_req, decision, cascade_specialty, available_models,
             )
@@ -290,10 +287,7 @@ async def chat_completions(
             wrapped = _stream_with_logging(raw_stream, log_params)
             return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score)
         else:
-            from .policy import PolicyEngine
-            cascade_specialty = (
-                PolicyEngine._infer_specialty(decision.policy) if decision.policy else ""
-            )
+            cascade_specialty = decision.policy.name if decision.policy else ""
             response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
                 proxy, cascade, request, decision, cascade_specialty, available_models,
             )

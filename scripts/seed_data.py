@@ -207,7 +207,6 @@ def _token_ranges(policy_name: str):
 
 def seed(conn: sqlite3.Connection, n: int = 5000) -> None:
     from policyflow import cost as cost_mod
-    from policyflow.policy import PolicyEngine
 
     cfg, eng = load_config()
     avail = list(cfg.available_models)
@@ -219,7 +218,7 @@ def seed(conn: sqlite3.Connection, n: int = 5000) -> None:
     # Pre-compute each policy's task type + top-N model candidates once.
     plan = []
     for p in pols:
-        task = PolicyEngine._infer_specialty(p)
+        task = p.name
         top = _top_models(task, avail, p.max_cost_tier or "", thresholds)
         # Fallback: if scoring yields nothing (task not in weights / no model
         # in tier), use route_to or the baseline so the row still has a model.

@@ -278,9 +278,8 @@ class RouteDecision:
         self.method = method
         self.score = score
         if policy and use_capability and available_models:
-            from .policy import PolicyEngine
             from .model_profiles import select_best_models
-            task = PolicyEngine._infer_specialty(policy)
+            task = policy.name
             top = select_best_models(
                 task, available_models, n=3,
                 cost_tier=policy.max_cost_tier,
