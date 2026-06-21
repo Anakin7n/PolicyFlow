@@ -12,6 +12,7 @@ class Policy:
     name: str
     route_to: str = ""              # explicit model (legacy path)
     keywords: list[str] = field(default_factory=list)
+    description: list[str] = field(default_factory=list)  # natural-language descriptions for centroid embedding
     max_input_tokens: int | None = None
     min_input_tokens: int | None = None
     has_image: bool = False
@@ -27,6 +28,7 @@ class Policy:
             name=data["name"],
             route_to=data.get("route_to", ""),
             keywords=match.get("keywords", []),
+            description=data.get("description", []),
             max_input_tokens=match.get("max_input_tokens"),
             min_input_tokens=match.get("min_input_tokens"),
             has_image=match.get("has_image", False),
@@ -38,7 +40,7 @@ class Policy:
 
     @property
     def keyword_text(self) -> str:
-        """All keywords joined into a single string for embedding."""
+        """All keywords joined into a single string (legacy fallback for embedding)."""
         return " ".join(self.keywords)
 
 class PolicyEngine:

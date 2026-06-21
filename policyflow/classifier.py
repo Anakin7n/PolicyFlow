@@ -2,12 +2,56 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+from pathlib import Path
+
 import numpy as np
 import httpx
 
+logger = logging.getLogger(__name__)
+
+# Persistent cache for policy embeddings — keyed by (model + description) hash
+# so swapping embedding models or editing descriptions naturally invalidates.
+# Lives in the project root so it's easy to inspect/clear.
+_CACHE_PATH = Path(__file__).resolve().parent.parent / ".policyflow_cache" / "embeddings.json"
+
+
+def _cache_load() -> dict[str, list[float]]:
+    """Read the on-disk cache, return {} on any error (cache is best-effort)."""
+    if not _CACHE_PATH.exists():
+        return {}
+    try:
+        return json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Embedding cache unreadable, ignoring: %s", exc)
+        return {}
+
+
+def _cache_save(cache: dict[str, list[float]]) -> None:
+    """Persist the cache; failure is non-fatal."""
+    try:
+        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to persist embedding cache: %s", exc)
+
+
+def _cache_key(model: str, texts: list[str]) -> str:
+    """Stable key over (embedding model, description list) — order matters."""
+    blob = model + "\n" + "\n".join(texts)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
 
 class EmbeddingClassifier:
-    """Embeds prompt text and matches against pre-computed policy keyword embeddings."""
+    """Embeds prompt text and matches against pre-computed policy centroid embeddings.
+
+    Each policy is represented by the *centroid* (mean) of embeddings of its
+    description sentences — a multi-anchor approach that captures the policy's
+    semantic region better than embedding a keyword bag.  Policies without a
+    description fall back to embedding their keyword text (legacy behavior).
+    """
 
     def __init__(
         self,
@@ -92,20 +136,45 @@ class EmbeddingClassifier:
         return np.array(embeddings[0])
 
     async def init_policies(self, policies: list) -> None:
-        """Pre-compute keyword embeddings for all non-default policies at startup."""
-        texts = []
-        names = []
+        """Pre-compute policy centroid embeddings at startup.
+
+        For each policy, embed every description sentence and average the
+        resulting vectors → that average is the policy's centroid.  Policies
+        without a description fall back to embedding their keyword text as a
+        single sentence (legacy behavior, less precise but still works).
+
+        Embeddings are cached on disk keyed by (model + description) hash —
+        cold start computes ~60-100 vectors (slow), warm start reads from
+        disk (instant).
+        """
+        cache = _cache_load()
+        cache_dirty = False
+
         for p in policies:
-            if p.keyword_text and not p.default:
-                texts.append(p.keyword_text)
-                names.append(p.name)
+            if p.default:
+                continue
 
-        if not texts:
-            return
+            # Description list is preferred; keyword_text is the legacy fallback.
+            texts = p.description or ([p.keyword_text] if p.keyword_text else [])
+            if not texts:
+                continue
 
-        embeddings = await self._embed(texts)
-        for name, emb in zip(names, embeddings):
-            self.policy_embeddings[name] = np.array(emb)
+            key = _cache_key(self.model, texts)
+            cached = cache.get(key)
+            if cached is not None:
+                self.policy_embeddings[p.name] = np.array(cached)
+                continue
+
+            # Cache miss → embed each text, average to a centroid.
+            embeddings = await self._embed(texts)
+            centroid = np.mean(np.array(embeddings), axis=0)
+            self.policy_embeddings[p.name] = centroid
+            cache[key] = centroid.tolist()
+            cache_dirty = True
+            logger.info("Computed centroid for policy %r (%d anchors)", p.name, len(texts))
+
+        if cache_dirty:
+            _cache_save(cache)
 
     def match(self, prompt_embedding: np.ndarray) -> tuple[str | None, float]:
         """Find the best-matching policy by cosine similarity.
