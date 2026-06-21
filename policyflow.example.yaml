@@ -131,8 +131,8 @@ embedding:
   base_url: https://ark.cn-beijing.volces.com/api/v3
   api_key: "${EMBEDDING_API_KEY}"
   model: doubao-embedding-vision-251215
-  similarity_threshold: 0.25   # 全局语义匹配阈值（按 doubao-embedding 尺度校准，与 verify_threshold 一致）
-  verify_threshold: 0.25       # 关键词命中后的复核阈值（避免"苹果手机"误中"苹果"水果策略）
+  similarity_threshold: 0.55   # 全局语义匹配阈值（doubao-embedding 尺度,centroid 后初始值,真实流量上线后可再校准）
+  verify_threshold: 0.55       # 关键词命中后的复核阈值（避免"苹果手机"误中"苹果"水果策略）
   timeout: 30
 
 # ── 价格分档（capability 模式下 max_cost_tier 用） ─────────────

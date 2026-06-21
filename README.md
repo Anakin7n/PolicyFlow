@@ -177,12 +177,12 @@ embedding:
   base_url: https://ark.cn-beijing.volces.com/api/v3            # ← 改这里
   api_key: "${EMBEDDING_API_KEY}"                                # ← .env 里填对应 key
   model: doubao-embedding-vision-251215                          # ← 改这里
-  similarity_threshold: 0.25   # 全局语义匹配阈值
-  verify_threshold: 0.25       # 关键词命中后复核阈值（避免歧义命中）
+  similarity_threshold: 0.55   # 全局语义匹配阈值
+  verify_threshold: 0.55       # 关键词命中后复核阈值（避免歧义命中）
   timeout: 30
 ```
 
-> ⚠️ **阈值要跟着 embedding 模型的尺度走**：不同模型的余弦相似度分布差异很大——OpenAI text-embedding 系相关文本常达 0.5～0.8，而 doubao-embedding-vision 这类即使强相关也只有 0.25～0.4。默认值 0.25 是按 doubao 校准的；如果你换成 OpenAI 等模型，需相应调高（如 0.5），否则会出现大量误命中。判断方法：用 `policyflow classify "<典型问题>"` 看相似度落在什么量级。
+> ⚠️ **阈值要跟着 embedding 模型的尺度走**：不同模型的余弦相似度分布差异很大。当前默认 0.55 是基于 doubao-embedding-vision + 策略 centroid 描述的实测——真实任务的强匹配落在 0.6～0.8，无意义输入(空语义)落在 0.4～0.5,0.55 是清晰的分界线。如果你换成 OpenAI text-embedding 系(相关文本常达 0.5～0.8、弱相关 0.3～0.5)，阈值大致仍可用 0.55 但建议自测;换成尺度不同的其他模型时,**务必先测一批典型输入再定阈值**。判断方法：用 `policyflow classify "<典型问题>"` 看真实/无意义输入的分数分布,取它们中间的分界点。
 
 > Embedding API 不填会怎样？路由自动降级：跳过关键词复核与全局语义匹配，仅用关键词精确匹配 + 兜底模型。不影响服务运行。
 
@@ -438,7 +438,7 @@ routing_mode: hybrid
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `keywords` | string[] | 关键词列表，命中任一即算命中。先精确子串匹配（命中后做 Embedding 复核挡掉歧义），仍未命中再走 Embedding 全局语义匹配（阈值 0.25） |
+| `keywords` | string[] | 关键词列表，命中任一即算命中。先精确子串匹配（命中后做 Embedding 复核挡掉歧义），仍未命中再走 Embedding 全局语义匹配（阈值 0.55） |
 | `max_input_tokens` | int | 输入 token **不超过**这个数才命中。配 `keywords` 用来防止长文被错归 |
 | `min_input_tokens` | int | 输入 token **不小于**这个数才命中。用来过滤掉太短的请求 |
 | `has_image` | bool | 请求含图片才命中（多模态请求） |
@@ -448,7 +448,7 @@ routing_mode: hybrid
 
 关键词匹配是大小写不敏感的子串匹配（OR 逻辑：数组里任一关键词出现在 prompt 里即命中）。
 
-**关键词命中后会做一次 Embedding 复核**——把 prompt 跟该策略的关键词集合算余弦相似度，低于 `verify_threshold`（默认 0.25）则视为误命中、撤销并继续往下走 Embedding 全局匹配。这是为了挡掉「"苹果"关键词误命中"苹果手机坏了"」这种歧义场景。
+**关键词命中后会做一次 Embedding 复核**——把 prompt 跟该策略的 centroid 描述向量算余弦相似度，低于 `verify_threshold`（默认 0.55）则视为误命中、撤销并继续往下走 Embedding 全局匹配。这是为了挡掉「"苹果"关键词误命中"苹果手机坏了"」这种歧义场景。
 
 ```yaml
 policies:
@@ -460,7 +460,7 @@ policies:
     cascade: true               # 启用级联验证
 ```
 
-**复核阈值在 `embedding.verify_threshold` 配置**（默认 0.25），调高 → 关键词更容易被推翻，调低 → 关键词更被信任。Embedding API 不可达时跳过复核、直接信任关键词命中（降级路径）。
+**复核阈值在 `embedding.verify_threshold` 配置**（默认 0.55），调高 → 关键词更容易被推翻，调低 → 关键词更被信任。Embedding API 不可达时跳过复核、直接信任关键词命中（降级路径）。
 
 ### 图片检测
 
@@ -473,13 +473,13 @@ policies:
 
 ### Embedding 全局语义匹配（关键词都没命中时的兜底）
 
-如果关键词阶段没命中（或被复核推翻），路由器会用 prompt 跟所有策略的关键词集合做余弦相似度比较，挑相似度最高的策略——前提是相似度 ≥ `similarity_threshold`（默认 0.25）。
+如果关键词阶段没命中（或被复核推翻），路由器会用 prompt 跟所有策略的 centroid 描述向量做余弦相似度比较，挑相似度最高的策略——前提是相似度 ≥ `similarity_threshold`（默认 0.55）。
 
 ```yaml
 # embedding 段配置阈值
 embedding:
-  similarity_threshold: 0.25   # 全局匹配阈值
-  verify_threshold: 0.25       # 关键词命中后的复核阈值
+  similarity_threshold: 0.55   # 全局匹配阈值
+  verify_threshold: 0.55       # 关键词命中后的复核阈值
 ```
 
 Embedding API 不可用时此阶段自动跳过，请求落到兜底逻辑。这是 PolicyFlow 设计的**降级路径**之一。
