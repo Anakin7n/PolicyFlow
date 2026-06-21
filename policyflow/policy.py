@@ -92,7 +92,6 @@ class PolicyEngine:
     def __init__(self, policies_data: list[dict], routing_mode: str = "hybrid") -> None:
         self.policies: list[Policy] = [Policy.from_dict(p) for p in policies_data]
         self.routing_mode = routing_mode
-        self._default: Policy | None = None
 
     def uses_capability_routing(self, policy: Policy) -> bool:
         """Whether this policy should use capability-aware model selection.
@@ -107,15 +106,6 @@ class PolicyEngine:
             return True
         # hybrid: no route_to → let the system pick
         return not bool(policy.route_to)
-
-    @property
-    def default(self) -> Policy | None:
-        if self._default is None:
-            for p in self.policies:
-                if p.default:
-                    self._default = p
-                    break
-        return self._default
 
     @property
     def non_default_policies(self) -> list[Policy]:

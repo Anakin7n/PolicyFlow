@@ -3,11 +3,13 @@
 Each model has a capability vector with dimensions:
   - benchmarks: MMLU, HumanEval, MATH, MT-Bench scores (normalized 0-1)
   - tags: what this model is known to excel at
-  - cost_tier: cheap / mid / expensive (affects scoring weight)
+  - cost_tier: cheap / mid / expensive (used by the max_cost_tier pool filter)
   - context_window: max tokens
 
-The router uses these to compute a composite score for every candidate model
-against any incoming request, balancing capability-match vs cost.
+The router scores every candidate model against a request by capability match
+and picks the strongest.  Spending is governed by the max_cost_tier filter,
+which bounds the candidate pool before scoring — price does not penalize
+capable models in the score itself (see score_model's budget_weight).
 
 All benchmark data sourced from official reports & public leaderboards (2026-06).
 """
@@ -398,13 +400,19 @@ TASK_WEIGHTS: dict[str, list[float]] = {
 def score_model(
     profile: ModelProfile,
     task_weights: list[float],
-    budget_weight: float = 0.2,
+    budget_weight: float = 0.0,
 ) -> float:
-    """Compute composite score for a model given a task.
+    """Compute a model's fitness score for a task.
 
-    score = capability_match(70%) + cost_efficiency(30%)
+    score = capability_match × (1 - budget_weight) + cost_efficiency × budget_weight
 
-    Higher = better fit for this task at this price.
+    With the default ``budget_weight=0`` the score is pure capability match:
+    within a candidate pool, the most capable model wins.  Spending is controlled
+    upstream by the ``max_cost_tier`` filter (which bounds the pool), not by
+    penalizing capable models here.  Raise budget_weight only if you want price to
+    also tip the ranking inside an already-bounded pool.
+
+    Higher = better fit for this task.
     """
     vec = profile.capability_vector
     # Weighted dot product → capability match
@@ -436,7 +444,7 @@ def select_best_model(
     specialty: str,
     available_models: list[str],
     cost_tier: str = "",
-    budget_weight: float = 0.2,
+    budget_weight: float = 0.0,
     cost_tier_thresholds: dict[str, float] | None = None,
 ) -> str | None:
     """Pick the best model for a task type from available candidates.
@@ -444,8 +452,12 @@ def select_best_model(
     Args:
         specialty: task type key in TASK_WEIGHTS (e.g. "代码生成")
         available_models: list of model IDs that are configured and available
-        cost_tier: optional budget filter ("cheap" / "mid" / "expensive")
-        budget_weight: how much to weigh cost vs capability (0=only capability, 1=only cost)
+        cost_tier: optional budget filter ("cheap" / "mid" / "expensive") — this
+            is how spending is controlled: it bounds the candidate pool.
+        budget_weight: how much price tips the ranking *within* the pool
+            (0=pure capability, the default; 1=only cost). Spending is normally
+            governed by cost_tier, so this stays 0 unless you want price to also
+            break ties among equally-capable models.
         cost_tier_thresholds: optional override for tier boundaries
             (defaults to DEFAULT_COST_TIER_THRESHOLDS)
 
@@ -489,7 +501,7 @@ def select_best_models(
     available_models: list[str],
     n: int = 3,
     cost_tier: str = "",
-    budget_weight: float = 0.2,
+    budget_weight: float = 0.0,
     cost_tier_thresholds: dict[str, float] | None = None,
 ) -> list[str]:
     """Return the top-N models for a task (same scoring as select_best_model).

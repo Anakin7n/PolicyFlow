@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
 
 from .classifier import EmbeddingClassifier
 from .config import Config
@@ -13,19 +15,77 @@ from .policy import Policy, PolicyEngine
 logger = logging.getLogger(__name__)
 
 
-def _extract_prompt(request: ChatCompletionRequest) -> str:
-    """Extract the user-facing prompt text from a chat request for embedding."""
+def _session_key(request: ChatCompletionRequest) -> str:
+    """Derive a stable session key from the system prompt + first user message.
+
+    Same conversation → same key across turns, because system and the opening
+    user message stay constant while later turns are appended.  No client header
+    required.  Returns "" when there's no usable content (don't track).
+    """
     parts: list[str] = []
     for msg in request.messages:
+        if msg.role in ("system", "developer"):
+            content = msg.content if isinstance(msg.content, str) else ""
+            parts.append(f"sys:{content[:200]}")
+            break
+    for msg in request.messages:
+        if msg.role == "user":
+            content = msg.content if isinstance(msg.content, str) else ""
+            parts.append(f"usr:{content[:200]}")
+            break
+    if not parts:
+        return ""
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+class SessionMemory:
+    """Remembers the model chosen for each conversation, for continuation turns.
+
+    A short follow-up like "继续" matches no policy and has no semantic content,
+    so it falls through to Phase 4.  When that happens and we've seen this
+    conversation before, we reuse the previous turn's model instead of dropping
+    to the fallback — the follow-up continues whatever task was underway.
+    """
+
+    def __init__(self, ttl: int = 1800) -> None:
+        self.ttl = ttl
+        self._store: dict[str, tuple[str, float]] = {}  # key → (model, expiry)
+
+    def get(self, key: str) -> str | None:
+        entry = self._store.get(key)
+        if entry and time.time() <= entry[1]:
+            return entry[0]
+        if entry:
+            del self._store[key]
+        return None
+
+    def set(self, key: str, model: str) -> None:
+        self._store[key] = (model, time.time() + self.ttl)
+
+
+def _extract_prompt(request: ChatCompletionRequest) -> str:
+    """Extract the text of the *latest* user message for routing.
+
+    Only the current turn is routed — not the whole history.  This is what lets
+    a continuation turn ("继续") fall through to Phase 4 (where the session's
+    previous model is reused) instead of being dragged into a policy by earlier
+    turns' keywords.  It also keeps a long coding session from pinning every
+    later turn to the topic of its opening messages.
+    """
+    for msg in reversed(request.messages):
+        if msg.role != "user":
+            continue
         content = msg.content
         if isinstance(content, str):
-            parts.append(content)
-        elif isinstance(content, list):
-            # Multi-modal content: extract text parts
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-    return "\n".join(parts).strip()
+            return content.strip()
+        if isinstance(content, list):
+            parts = [
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            return "\n".join(parts).strip()
+    return ""
 
 
 def _estimate_tokens(text: str) -> int:
@@ -59,6 +119,8 @@ class Router:
         )
         self.verify_threshold = config.embedding_verify_threshold
         self.cost_tier_thresholds = config.cost_tier_thresholds
+        self.sessions = SessionMemory()
+        self.fallback_model = config.upstream_fallback_model
         self._initialized = False
 
     async def initialize(self) -> None:
@@ -98,7 +160,9 @@ class Router:
         4. Default policy — fallback
 
         When a policy uses `specialty` (capability routing), the best model
-        is selected automatically based on capability scores + cost.
+        is selected automatically by capability score within the policy's
+        max_cost_tier budget (the tier bounds the pool; the score picks the
+        most capable model in it).
         """
         available = self.config.available_models
         prompt = _extract_prompt(request)
@@ -115,10 +179,21 @@ class Router:
                 original_model=request.model,
             )
 
+        session_key = _session_key(request)
+
+        def finalize(decision: RouteDecision) -> RouteDecision:
+            """Record this turn's model for the session, then return the decision.
+
+            Lets a later continuation turn ("继续") reuse this model in Phase 4.
+            """
+            if session_key:
+                self.sessions.set(session_key, decision.target_model)
+            return decision
+
         # Phase 1: Image detection (explicit rule)
         for policy in self.engine.non_default_policies:
             if policy.has_image and has_img:
-                return decide(policy, "image_match", 1.0)
+                return finalize(decide(policy, "image_match", 1.0))
 
         # Embed the prompt once — reused by both keyword verification and
         # global embedding match. None if embedding API is unavailable, in
@@ -147,10 +222,10 @@ class Router:
             # Keyword hit — verify with embedding similarity if available.
             # If embedding is down, trust the keyword (graceful degradation).
             if prompt_emb is None:
-                return decide(policy, "keyword_match", 1.0)
+                return finalize(decide(policy, "keyword_match", 1.0))
             similarity = self.classifier.similarity_to(prompt_emb, policy.name)
             if similarity >= self.verify_threshold:
-                return decide(policy, "keyword_verified", similarity)
+                return finalize(decide(policy, "keyword_verified", similarity))
             logger.info(
                 "Keyword hit on policy %r overridden by verification (similarity=%.3f < %.3f)",
                 policy.name, similarity, self.verify_threshold,
@@ -164,22 +239,24 @@ class Router:
                 if policy_name:
                     for p in self.engine.policies:
                         if p.name == policy_name:
-                            return decide(p, "embedding_match", embed_score)
+                            return finalize(decide(p, "embedding_match", embed_score))
                 else:
                     logger.info(
                         "Embedding: best match below threshold (max=%.3f, threshold=%.3f)",
                         embed_score, self.classifier.threshold,
                     )
             except Exception as exc:
-                logger.warning("Embedding classification failed, falling back to default: %s", exc)
+                logger.warning("Embedding classification failed, no policy matched: %s", exc)
 
-        # Phase 4: Default
-        default = self.engine.default
-        if default:
-            return decide(default, "default", embed_score)
+        # Phase 4: Nothing matched. A continuation turn ("继续") carries no
+        # routable signal — reuse the session's previous model if we have one;
+        # otherwise fall back to the single fallback model.
+        if session_key:
+            prev = self.sessions.get(session_key)
+            if prev:
+                return decide(None, "session_continuation", embed_score).with_model(prev)
 
-        # Ultimate fallback: keep original model
-        return decide(None, "passthrough", 0.0)
+        return decide(None, "fallback", 0.0).with_model(self.fallback_model)
 
 
 class RouteDecision:
@@ -222,6 +299,11 @@ class RouteDecision:
                 self.method = f"capability({task})"
         else:
             self.target_model = policy.route_to if policy else original_model
+
+    def with_model(self, model: str) -> "RouteDecision":
+        """Override the resolved target model (Phase 4 continuation/fallback)."""
+        self.target_model = model
+        return self
 
     def __repr__(self) -> str:
         return (

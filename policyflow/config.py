@@ -293,9 +293,3 @@ class Config:
     @property
     def optimizer_data(self) -> dict:
         return self.data.get("optimizer", {})
-
-    # ── Modifiers ──────────────────────────────────────────────────
-
-    @property
-    def modifiers_data(self) -> dict:
-        return self.data.get("modifiers", {})

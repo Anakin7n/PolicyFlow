@@ -101,11 +101,6 @@ policies_hybrid:
       max_input_tokens: 150
     route_to: "deepseek-v4-flash"
 
-  - name: "默认"
-    match:
-      default: true               # 兜底：前面规则都没命中走这里
-    route_to: "deepseek-v4-pro"
-
 # ── Cascade ───────────────────────────────────────────────────────────
 cascade:
   enabled: true
@@ -115,16 +110,6 @@ cascade:
     - "deepseek-v4-pro"
     - "claude-sonnet-4-6"
   max_retries: 2
-
-# ── Modifiers ─────────────────────────────────────────────────────────
-modifiers:
-  agent_detection: true
-  reasoning_detection: true
-  context_window_filter: false
-  session_persistence: true
-  session_ttl: 1800
-  strongest_model: "claude-opus-4-8"
-  reasoning_model: "deepseek-r1"
 
 # ── Optimizer ─────────────────────────────────────────────────────────
 optimizer:

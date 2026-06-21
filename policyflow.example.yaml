@@ -280,11 +280,6 @@ policies_hybrid:
       max_input_tokens: 150       # 短问句兜住，长文走更深的策略
     route_to: "deepseek-v4-flash"
 
-  - name: "默认"
-    match:
-      default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
-    route_to: "deepseek-v4-pro"
-
 # ── 算法全托管（capability 模式使用）───────────────────────────────
 # 不写 route_to — 根据识别出的任务类型，从所有可用模型里算分选最优。
 policies_capability:
@@ -406,11 +401,6 @@ policies_capability:
       ]
       max_input_tokens: 150
     max_cost_tier: cheap          # 价格上限 = cheap：只用便宜档模型
-
-  - name: "默认"
-    match:
-      default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
-    max_cost_tier: cheap
 
 # ── 全指定（explicit 模式使用）────────────────────────────────────
 # 全部写死模型，系统不插手。
@@ -534,11 +524,6 @@ policies_explicit:
       max_input_tokens: 150
     route_to: "deepseek-v4-flash"
 
-  - name: "默认"
-    match:
-      default: true               # 兜底：前面规则都没命中走这里（每个策略集必须有且只能有一条）
-    route_to: "deepseek-v4-pro"
-
 # ══════════════════════════════════════════════════════════════════════
 # 级联验证 — 回答后验证质量，不通过则自动升级到更强的模型。
 # 只有策略里开了 cascade: true 的才会触发。
@@ -566,16 +551,3 @@ optimizer:
   enabled: true
   model: deepseek-v4-flash      # 用哪个模型分析。⚠ 必须已在 providers 中配了真实 Key，否则自动降级为 upstream.fallback_model
   max_suggestions: 5            # 最多给几条建议
-
-# ══════════════════════════════════════════════════════════════════════
-# 智能修饰器 — 策略匹配之前运行的规则检查，全是本地判断不调 API。
-# 从上到下依次检查，命中即跳过后续策略匹配。
-# ══════════════════════════════════════════════════════════════════════
-modifiers:
-  agent_detection: true         # 检测到 Agent/工具调用 → 强制用最强模型
-  reasoning_detection: true     # 检测到复杂推理需求 → 切推理模型
-  context_window_filter: true   # 输入超模型窗口 → 自动换大窗口模型
-  session_persistence: true     # 同一会话固定用一个模型
-  session_ttl: 1800             # 会话保持时间（秒），默认 30 分钟
-  strongest_model: "auto"       # Agent 检测的目标模型，"auto"=从可用模型选 Agent 能力+性价比最优
-  reasoning_model: "auto"       # 推理检测的目标模型，"auto"=从可用模型选推理能力+性价比最优

@@ -29,7 +29,7 @@ def anthropic_to_chat_request(data: dict[str, Any]) -> ChatCompletionRequest:
     """Convert an Anthropic Messages API request body to a ChatCompletionRequest.
 
     The returned request goes straight into the existing PolicyFlow pipeline
-    (modifiers -> router -> proxy) — no other code changes needed.
+    (router -> proxy) — no other code changes needed.
     """
     messages = _convert_messages(data)
     tools = _convert_tools(data.get("tools"))
@@ -292,9 +292,31 @@ class AnthropicStreamConverter:
         self._input_tokens = 0
         self._output_tokens = 0
         self._stop_emitted = False
+        self._buffer = ""  # Accumulates partial SSE lines across network chunks
+        # OpenAI streams tool_calls as fragments (name in the first chunk, the
+        # JSON arguments split across later chunks).  Accumulate them by their
+        # OpenAI index and emit complete Anthropic tool_use blocks in flush().
+        self._tool_calls: dict[int, dict[str, str]] = {}
 
     def feed(self, chunk_str: str) -> list[bytes]:
-        """Feed one OpenAI SSE data line, return Anthropic SSE events to emit."""
+        """Feed raw bytes from the upstream stream, return Anthropic SSE events.
+
+        The upstream yields arbitrary network chunks that don't align with SSE
+        line boundaries — one chunk may hold several lines, or half a line.  We
+        buffer until we have complete lines (split on ``\\n``) and process those,
+        keeping any trailing partial line for the next call.
+        """
+        events: list[bytes] = []
+        self._buffer += chunk_str
+
+        # Process all complete lines; keep the trailing partial in the buffer.
+        while "\n" in self._buffer:
+            raw_line, self._buffer = self._buffer.split("\n", 1)
+            events.extend(self._feed_line(raw_line))
+        return events
+
+    def _feed_line(self, chunk_str: str) -> list[bytes]:
+        """Process one complete SSE line, return Anthropic SSE events to emit."""
         events: list[bytes] = []
 
         # OpenAI SSE: "data: {...}\n\n"
@@ -359,10 +381,17 @@ class AnthropicStreamConverter:
             events.append(delta_event)
 
         if tool_calls:
-            # Simple: just accumulate and emit in flush. For now, skip
-            # streaming tool_calls — the full tool_use appears in the
-            # non-streaming response path anyway.
-            pass
+            # Accumulate fragments by index; emit complete blocks in flush().
+            for tc in tool_calls:
+                idx = tc.get("index", 0)
+                slot = self._tool_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["arguments"] += fn["arguments"]
 
         if finish:
             self._finish_reason = _map_finish_reason(finish)
@@ -381,6 +410,37 @@ class AnthropicStreamConverter:
                 "type": "content_block_stop",
                 "index": 0,
             }))
+
+        # Emit accumulated tool_use blocks (indexed after any text block)
+        next_index = self._content_index + 1
+        for _, tc in sorted(self._tool_calls.items()):
+            try:
+                inp = json.loads(tc["arguments"]) if tc["arguments"] else {}
+            except json.JSONDecodeError:
+                inp = {}
+            events.append(_sse("content_block_start", {
+                "type": "content_block_start",
+                "index": next_index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": tc["id"] or f"toolu_{uuid.uuid4().hex[:12]}",
+                    "name": tc["name"],
+                    "input": {},
+                },
+            }))
+            events.append(_sse("content_block_delta", {
+                "type": "content_block_delta",
+                "index": next_index,
+                "delta": {"type": "input_json_delta", "partial_json": json.dumps(inp, ensure_ascii=False)},
+            }))
+            events.append(_sse("content_block_stop", {
+                "type": "content_block_stop",
+                "index": next_index,
+            }))
+            next_index += 1
+
+        if self._tool_calls:
+            self._finish_reason = "tool_use"
 
         # Message delta with stop reason + usage
         events.append(_sse("message_delta", {

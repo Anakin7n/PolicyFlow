@@ -8,8 +8,9 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
+from fastapi import Body, FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import db
@@ -23,7 +24,6 @@ from .cascade import CascadeConfig, CascadeValidator
 from .config import Config
 from .cost import calc_compared_cost, calc_cost
 from .models import ChatCompletionRequest, ChatCompletionResponse, Message, ModelsResponse
-from .modifiers import ModifierEngine
 from .proxy import ProxyError, UpstreamProxy
 from .router import Router
 
@@ -61,7 +61,6 @@ async def lifespan(app: FastAPI):
                 return True, "judge_error"
         judge_fn = _judge
         cascade = CascadeValidator(cascade_config, judge_fn=judge_fn)
-    modifiers = ModifierEngine(config.modifiers_data)
 
     await router.initialize()
 
@@ -69,7 +68,6 @@ async def lifespan(app: FastAPI):
     app.state.proxy = proxy
     app.state.router = router
     app.state.cascade = cascade
-    app.state.modifiers = modifiers
 
     logger.info("PolicyFlow v0.5.0 started")
 
@@ -93,8 +91,8 @@ app = FastAPI(
 
 @app.post("/v1/messages")
 async def anthropic_messages(
-    anthropic_body: dict[str, Any],
-    fastapi_request: FastAPIRequest,
+    anthropic_body: dict[str, Any] = Body(...),
+    fastapi_request: FastAPIRequest = None,
 ):
     """Anthropic Messages API endpoint — converts to OpenAI, routes, converts back.
 
@@ -106,7 +104,6 @@ async def anthropic_messages(
     router: Router = app.state.router
     proxy: UpstreamProxy = app.state.proxy
     cascade: CascadeValidator = app.state.cascade
-    modifiers: ModifierEngine = app.state.modifiers
     config: Config = app.state.config
 
     t_start = time.time()
@@ -127,34 +124,22 @@ async def anthropic_messages(
     prompt_hash_val = hash_prompt(prompt_text) if prompt_text else ""
     prompt_preview_val = prompt_text[:500] if config.log_prompt_preview else ""
     judge_reason_val = ""
-    session_id = fastapi_request.headers.get("X-Session-ID")
     user = fastapi_request.headers.get("X-User", "default")
     response = None
     cascade_attempts = 0
     success = True
 
-    # ── 2. Modifiers ───────────────────────────────────────────
-    available_models = proxy.config.available_models
-    modifier_result = modifiers.run(openai_req, session_id, available_models)
-
-    if modifier_result.has_override:
-        openai_req.model = modifier_result.override_model
-        route_method = modifier_result.reason
-        route_score = 1.0
-        route_policy_name = modifier_result.reason
-    else:
-        decision = await router.route(openai_req)
-        openai_req.model = decision.target_model
-        route_method = decision.method
-        route_score = decision.score
-        route_policy_name = decision.policy.name if decision.policy else "none"
+    # ── 2. Route ───────────────────────────────────────────────
+    decision = await router.route(openai_req)
+    openai_req.model = decision.target_model
+    route_method = decision.method
+    route_score = decision.score
+    route_policy_name = decision.policy.name if decision.policy else "none"
 
     logger.info(
         "Route [anthropic]: %s → %s  [%s, %.3f]",
         original_model, openai_req.model, route_method, route_score,
     )
-
-    modifiers.persist_session(session_id, openai_req.model)
 
     # ── 3. Forward (non-streaming only for cascade support) ────
     if stream:
@@ -250,11 +235,10 @@ async def chat_completions(
     request: ChatCompletionRequest,
     fastapi_request: FastAPIRequest,
 ):
-    """Chat completions with full pipeline: modifiers → router → cascade → log."""
+    """Chat completions with full pipeline: router → cascade → log."""
     router: Router = app.state.router
     proxy: UpstreamProxy = app.state.proxy
     cascade: CascadeValidator = app.state.cascade
-    modifiers: ModifierEngine = app.state.modifiers
     config: Config = app.state.config
 
     t_start = time.time()
@@ -271,38 +255,24 @@ async def chat_completions(
     prompt_hash_val = hash_prompt(prompt_text) if prompt_text else ""
     prompt_preview_val = prompt_text[:500] if config.log_prompt_preview else ""
     judge_reason_val = ""
-    session_id = fastapi_request.headers.get("X-Session-ID")
     user = fastapi_request.headers.get("X-User", "default")
     response = None  # Pre-bind for finally block safety
     cascade_attempts = 0
     success = True
 
-    # ── Step 1: Modifiers (pre-routing overrides) ──────────────────
-    available_models = proxy.config.available_models
-    modifier_result = modifiers.run(request, session_id, available_models)
-
-    if modifier_result.has_override:
-        request.model = modifier_result.override_model
-        route_method = modifier_result.reason
-        route_score = 1.0
-        route_policy_name = modifier_result.reason
-    else:
-        # ── Step 2: Policy routing ─────────────────────────────────
-        decision = await router.route(request)
-        request.model = decision.target_model
-        route_method = decision.method
-        route_score = decision.score
-        route_policy_name = decision.policy.name if decision.policy else "none"
+    # ── Step 1: Route ──────────────────────────────────────────────
+    decision = await router.route(request)
+    request.model = decision.target_model
+    route_method = decision.method
+    route_score = decision.score
+    route_policy_name = decision.policy.name if decision.policy else "none"
 
     logger.info(
         "Route: %s → %s  [%s, %.3f]",
         original_model, request.model, route_method, route_score,
     )
 
-    # ── Step 3: Persist session ────────────────────────────────────
-    modifiers.persist_session(session_id, request.model)
-
-    # ── Step 4: Forward + cascade ──────────────────────────────────
+    # ── Step 2: Forward + cascade ──────────────────────────────────
     try:
         if request.stream:
             if cascade.config.enabled and cascade.config.verifier != "rule_only":
@@ -588,7 +558,6 @@ async def _stream_with_logging(
                 similarity_score=log_params.get("score", 0.0),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
                 estimated_cost=estimated_cost,
                 compared_cost=compared_cost,
                 cascade_attempts=0,

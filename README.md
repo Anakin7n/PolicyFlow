@@ -12,7 +12,7 @@
 **你的 YAML。你的 Key。没有黑盒。** 策略即配置，改一行生效，不藏逻辑在代码里。供应商 API Key 直连，不做中间代理。
 
 <p align="center">
-  支持 <strong>Cursor</strong> · <strong>Claude Code</strong> · <strong>Codex CLI</strong> · <strong>Aider</strong> · <strong>ChatBox</strong> · <strong>OpenAI SDK</strong> · <strong>Anthropic 原生协议</strong> · 任意 OpenAI 兼容客户端
+  支持 <strong>Cursor</strong> · <strong>Claude Code</strong> · <strong>Codex CLI</strong> · <strong>Aider</strong> · <strong>ChatBox</strong> · <strong>OpenAI SDK</strong> · <strong>Anthropic 原生协议</strong> · 任意 OpenAI 或 Anthropic 兼容客户端
 </p>
 
 **一次普通办公会话，省了多少：**
@@ -32,7 +32,7 @@
 ## “从裸调 API 到智能调度，PolicyFlow 能做什么？”
 
 - **YAML 即策略，改一行生效。** 不写死在代码里——今天觉得"翻译"该走便宜模型，打开 yaml 把 max_cost_tier 从 mid 改成 cheap，重启即生效。
-- **两种方式自由组合。** 想精确控制？写 `route_to` 把这任务钉死到一个模型，你说翻译任务用豆包，我就用豆包。想省心？算法帮你选， 8 维能力分（编码、推理、写作、多语言……），13个任务类型各有对应的八个维度权重。翻译看重写作和多语言，架构看重编码和推理，帮你选出最合适的那一个。
+- **两种方式自由组合。** 想精确控制？写 `route_to` 把这任务钉死到一个模型，你说翻译任务用豆包，我就用豆包。想省心？算法帮你选， 8 维能力分（编码、推理、写作、多语言……），12个任务类型各有对应的八个维度权重。翻译看重写作和多语言，架构看重编码和推理，帮你选出最合适的那一个。
 - **自建 Key 和平台套餐统一调度，规则透明。** 各大模型的直连 Key、各厂商Coding Plan的聚合 Key（一个 Key 下挂 Kimi/GLM/豆包/MiniMax 等多个模型）在同一条 YAML 里管理，策略统一分配到各自端点。平台 auto 的局限在于：规则不透明（无法解释为何选 A 不选 B），范围局限于套餐内模型，无法纳入自建 Key。PolicyFlow 取消了这两条边界——所有来源的模型在同一任务维度下按同一套能力评分竞争，你定策略，你来dispatch，逻辑完全可见。
 - **双维静默容灾。** 提供“供应商”与“模型”两层保障：支持同模型多 Provider 轮询，主Provider挂了（断连、额度耗尽）自动切备用Provider；同时每个任务支持配置 Top-3 候选模型，主模型不可用时秒切备选。双重防线兜底，全程无感，丝滑 Coding。
 - **省了多少全记着。** 每条请求记入 SQLite——走了哪个策略、花了多少钱、和 baseline 比省了多少。有全屏 TUI 仪表盘，有 AI 优化引擎（分析日志出建议），有 CLI export 给你二次分析。
@@ -63,33 +63,27 @@ PolicyFlow 运行在你的本地环境（默认监听 localhost:8000）。你只
     OpenAI 兼容协议  → POST http://localhost:8000/v1/chat/completions
     Anthropic 原生协议 → POST http://localhost:8000/v1/messages   （Claude Code 等 Anthropic 原生客户端用）
   请求体: { model: "gpt-4o", messages: [...], tools?: [...] }
-  请求头: X-Session-ID（客户端自己生成的会话 ID，不传也行；传了的话同一 ID 30 分钟内固定走同一个模型）
   │
-  ↓ PolicyFlow 收到后依次跑下面 5 步
+  ↓ PolicyFlow 收到后依次跑下面 4 步
   │
-  ├── ① 智能修饰器（本地规则，0 延迟 0 费用，命中即跳过 ②③）
-  │     ├─ Agent 检测   看 tools 数组 / tool_calls / system 标记 → strongest_model
-  │     ├─ 会话保持     看 X-Session-ID（默认 30 min TTL）→ 复用上次模型
-  │     ├─ 推理检测     扫 prompt 关键词 ≥2 个（"证明"/"系统设计"…）→ reasoning_model
-  │     └─ 窗口过滤     估算 token > 当前模型窗口 → 升级到大窗口模型
-  │
-  ├── ② 策略匹配（按 YAML policies 从上到下扫）
+  ├── ① 策略匹配（按 YAML policies 从上到下扫，只看当前轮最新一条用户消息）
   │     图片检测 → 命中即停
-  │     关键词精确匹配命中 → Embedding 复核语境（≥0.25 才放行，挡掉"苹果"匹"苹果手机"这类歧义）
-  │     未命中 → Embedding 全局语义匹配（阈值 0.25）
-  │     仍未命中 → 走 default 策略
+  │     关键词精确匹配命中 → Embedding 复核语境（≥阈值 才放行，挡掉"苹果"匹"苹果手机"这类歧义）
+  │     未命中 → Embedding 全局语义匹配
+  │     仍未命中 → 看会话记忆：本会话上一轮有模型则沿用（承接 "继续" 这类无语义跟进），
+  │                否则走统一兜底模型（fallback_model）
   │     → 命中后确定任务类型（如"代码生成"、"复杂推理"）
   │
-  ├── ③ 路由决策：根据任务类型选模型
+  ├── ② 路由决策：根据任务类型选模型
   │     策略写了 route_to → 直接用
-  │     没写 route_to → 按任务类型的 8 维能力权重对所有可用模型打分，Top-3 加权随机（90/7/3）
+  │     没写 route_to → 按任务类型的 8 维能力权重对可用模型打分，Top-3 加权随机（90/7/3）
   │     选定 model → 查 providers 映射 → 改写 model 字段 + 切对应 base_url
   │
-  ├── ④ 级联验证（仅当策略 cascade: true）
+  ├── ③ 级联验证（仅当策略 cascade: true）
   │     模型作答 → 规则验证器 / LLM Judge 评估
   │     不通过 → 沿能力评分升一档重试（最多 max_retries 次）
   │
-  └── ⑤ 成本记录   SQLite 写一行：策略命中、修饰器决策、最终模型、token、
+  └── ④ 成本记录   SQLite 写一行：策略命中、最终模型、token、
                    费用、judge 反馈 —— 供 report / optimize 命令分析
 
 CLI 工具：
@@ -170,7 +164,6 @@ providers:
 | `policies_explicit` | explicit 模式下的策略集，全写死模型 |
 | `cascade` | 级联验证：验证方式、升级链条、最大重试次数。若启用 LLM 裁判，`judge_model` 必须已在 `providers` 中配了真实 Key |
 | `cost_tiers` | `max_cost_tier` 的分档边界（可选，省略用默认 cheap<0.5、mid<1.7） |
-| `modifiers` | 四个修饰器的开关 + `strongest_model` / `reasoning_model` 目标模型（详见下方"智能修饰器"节） |
 | `optimizer` | AI 优化引擎：是否启用、用哪个模型分析、最多几条建议。所用模型必须已在 `providers` 中配了真实 Key |
 | `logging` | `log_prompt_preview` 是否记录提问原文（默认 `true`，利于优化建议；隐私敏感设 `false`，详见"AI 优化引擎"节） |
 
@@ -191,7 +184,7 @@ embedding:
 
 > ⚠️ **阈值要跟着 embedding 模型的尺度走**：不同模型的余弦相似度分布差异很大——OpenAI text-embedding 系相关文本常达 0.5～0.8，而 doubao-embedding-vision 这类即使强相关也只有 0.25～0.4。默认值 0.25 是按 doubao 校准的；如果你换成 OpenAI 等模型，需相应调高（如 0.5），否则会出现大量误命中。判断方法：用 `policyflow classify "<典型问题>"` 看相似度落在什么量级。
 
-> Embedding API 不填会怎样？路由自动降级：跳过关键词复核与全局语义匹配，仅用关键词精确匹配 + 默认策略。不影响服务运行。
+> Embedding API 不填会怎样？路由自动降级：跳过关键词复核与全局语义匹配，仅用关键词精确匹配 + 兜底模型。不影响服务运行。
 
 支持的 api_key 格式：直接写字符串或 `${ENV_VAR}` 引用环境变量。
 
@@ -268,9 +261,8 @@ ANTHROPIC_API_KEY=sk-ant-your-real-key
 | 1 | `policyflow.yaml` 的 `providers` 段 | 模型 ID 加进 `models` 列表 | **必填**——不加根本路由不到 |
 | 2 | [policyflow/cost.py](policyflow/cost.py) 的 `MODEL_PRICES` | `"模型ID": (input价, output价)` | 仪表盘成本按 fallback `$1/M` 估算，**金额不准** |
 | 3 | [policyflow/model_profiles.py](policyflow/model_profiles.py) 的 `PROFILES` | 8 维能力评分 + 价格 + 上下文窗口 | **能力路由失效**——不写 `route_to` 的策略选不到这个模型 |
-| 4 | [policyflow/modifiers.py](policyflow/modifiers.py) 的 `MODEL_WINDOWS` | `"模型ID": 窗口大小` | 长 prompt 窗口超限时不会被自动升级到这个模型 |
 
-**强烈建议四步全做。** 否则相当于把这个模型放进一个"哑路由"——只有写死 `route_to:` 才能用到，capability 模式和评分系统全部绕开它。如果你接入的是一个比内置模型更强或更便宜的新模型，第 3 步尤其重要——评分系统看不到它就永远不会选它，这等于浪费了 PolicyFlow 最有价值的功能。
+**强烈建议三步全做。** 否则相当于把这个模型放进一个"哑路由"——只有写死 `route_to:` 才能用到，capability 模式和评分系统全部绕开它。如果你接入的是一个比内置模型更强或更便宜的新模型，第 3 步尤其重要——评分系统看不到它就永远不会选它，这等于浪费了 PolicyFlow 最有价值的功能。
 
 第 3 步的 8 维评分需要主观判断（参考已有模型的相对水平），你可以从一个保守的起点开始，跑一段时间用 `policyflow optimize` 看实际表现再调。
 
@@ -490,26 +482,25 @@ embedding:
   verify_threshold: 0.25       # 关键词命中后的复核阈值
 ```
 
-Embedding API 不可用时此阶段自动跳过，请求落到默认策略。这是 PolicyFlow 设计的**降级路径**之一。
+Embedding API 不可用时此阶段自动跳过，请求落到兜底逻辑。这是 PolicyFlow 设计的**降级路径**之一。
 
-### 默认路由（兜底策略）
+### 兜底与会话承接
 
-每个策略集**必须有且只能有一条** `default: true` 的策略。前面所有规则（图片检测、关键词匹配、Embedding 语义匹配）都没命中时，路由器交给这条处理。
+前面所有规则（图片检测、关键词匹配、Embedding 语义匹配）都没命中时，路由器按这个顺序兜底：
+
+1. **会话承接**——查本会话（以 system + 首条用户消息的哈希为键识别，无需客户端传任何头）上一轮用过的模型，有则沿用。这样像「继续」「接着写」这类**本身无语义、无法匹配任何策略**的跟进请求，会延续上一轮任务所用的模型，而不是被当成闲聊掉到便宜档。会话记忆有 TTL，过期即清。
+2. **统一兜底模型**——没有可沿用的上一轮（如会话首句就没匹配上），走 `upstream.fallback_model`。这同时也是上游供应商全部失败时的容灾模型，二者整合为同一个兜底出口；日志的 `method` 字段区分两种触发源（`session_continuation` / `fallback`）。
 
 ```yaml
-  - name: "默认"
-    match:
-      default: true                  # ← 标记为兜底，不参与主动匹配
-    route_to: "deepseek-v4-pro"      # ← 真正命中默认时用什么模型
+upstream:
+  fallback_model: "deepseek-v4-flash"   # 没命中任何策略、又无上一轮可沿用时的兜底
 ```
 
-**最佳实践：让默认尽可能少被命中。** 默认是兜底而不是主力——多写几条策略覆盖常见场景（闲聊、概念问答、邮件草稿…），让请求精确路由到便宜模型，比让所有"漏网"请求都流向默认更省钱。示例 yaml 的「日常闲聊与简单问答」策略就是这个思路：用关键词 + token 上限拦住短问句，分流到 `claude-haiku-4-5`。
-
-`default: true` 的策略不参与任何主动匹配——即使你写了 `keywords` 或 `has_image` 也会被忽略。它只在所有其他策略都没命中时被启用。
+**最佳实践：多写几条策略覆盖常见场景**（闲聊、概念问答、邮件草稿…），让请求精确路由到合适的便宜模型，比让"漏网"请求都流向兜底更省钱。示例 yaml 的「日常闲聊与简单问答」策略就是这个思路：用关键词 + token 上限拦住短问句，分流到便宜模型。
 
 ### 能力感知路由（智能选模）
 
-不写 `route_to`，系统自己选。根据识别出的**任务类型**，用对应的 8 维评分权重对所有可用模型打分——**只从填了真实 Key 的供应商中挑**，未填 Key 的不参选。13 种任务类型的权重内置在 [model_profiles.py](policyflow/model_profiles.py) 里：
+不写 `route_to`，系统自己选。根据识别出的**任务类型**，用对应的 8 维评分权重对所有可用模型打分——**只从填了真实 Key 的供应商中挑**，未填 Key 的不参选。12 种任务类型的权重内置在 [model_profiles.py](policyflow/model_profiles.py) 里：
 
 ```yaml
   - name: "代码生成"
@@ -596,42 +587,6 @@ providers:
 **不需要额外配置字段**——把同一个模型写在多个 provider 下即自动启用容灾。403（权限不足）和 400（请求格式错误）不会触发切换——换供应商也解决不了。401/402/429/5xx/连接超时均会触发切换。所有 provider 都失败时，最终 fallback 到 upstream，model 按 `upstream.fallback_model` 改写（如配了的话）。
 
 
-## 智能修饰器
-
-修饰器在策略匹配之前运行，命中即覆盖路由决策、跳过策略匹配。**全部是本地规则判断，不调任何 API，0 延迟 0 费用。**
-
-| 修饰器 | 触发条件 | 动作 |
-|--------|---------|------|
-| **Agent 检测** | 请求带 `tools` 数组、`tool_calls`、`role=tool` 消息，或 system prompt 含 `you are an agent` 等标记 | 强制路由到 `strongest_model` |
-| **推理检测** | prompt 命中 ≥2 个推理关键词（"证明"/"逐步思考"/"系统设计"/"安全审计"/"架构决策"…完整列表见 [policyflow/modifiers.py:127-133](policyflow/modifiers.py#L127-L133)） | 路由到 `reasoning_model` |
-| **上下文窗口** | 估算 token 总数超过当前模型已知窗口 | 自动切到更大窗口模型 |
-| **会话持久化** | 相同 `X-Session-ID` 的后续请求 | 复用首次选择的模型（默认 TTL 30 min） |
-
-> Agent 检测看的是**客户端发来的 OpenAI 格式 payload 结构**，不是用户输入的文字。Cursor / Claude Code 这类 coding agent 即使转发的是"今天天气怎样"，请求里也带着 `tools=[bash, edit, ...]`，照样命中。
-
-### 配置（`policyflow.yaml` 的 `modifiers` 段）
-
-```yaml
-modifiers:
-  agent_detection: true
-  reasoning_detection: true
-  context_window_filter: true
-  session_persistence: true
-  session_ttl: 1800                    # 会话保持 TTL，单位秒
-  strongest_model: "claude-opus-4-8"   # Agent 检测命中后的目标
-  reasoning_model: "deepseek-r1"       # 推理检测命中后的目标
-```
-
-`strongest_model` 和 `reasoning_model` 接受三种值：
-
-| 写法 | 行为 |
-|---|---|
-| 具体模型名（如 `claude-opus-4-8` / `deepseek-r1` / `o3-mini`） | 直接用。如果该模型不在任何 provider 的 `models` 里，自动降级到 auto |
-| `"auto"` | 从所有可用模型里按"Agent 工具调用"或"逻辑分析"任务的 8 维评分自动挑性价比最优 |
-| 省略不写 | 默认 `"auto"` —— 走能力评分自动挑 |
-
-适合做 reasoning 的候选：`claude-opus-4-8`（最强）、`deepseek-r1`（性价比之王）、`o3-mini`、`qwen-max`、`glm-5.2`。两个目标模型可以分开配——比如 Agent 用 opus（工具调用稳）、reasoning 用 deepseek-r1（推理强且便宜）。
-
 ## 级联验证
 
 > 级联验证的设计理念源于 [NadirClaw](https://github.com/nadirclaw/nadirclaw)：回答发出后先验证质量，不通过则换更强的模型重试。PolicyFlow 在此基础上把容灾拆为三层独立机制，升级不再依赖静态链条，改为按能力评分逐档升。
@@ -676,7 +631,7 @@ cascade:
 
 验证不通过时，PolicyFlow **优先按模型能力评分**选下一个升级目标，而不是照搬静态链：
 
-- **纯能力排序，不看价格**。日常路由会用 20% 的价格权重来兼顾省钱，但级联升级只在便宜模型已经失败后才发生——这时诉求是"把事做对"，不是省钱。所以升级阶段价格权重归零，只比谁更能胜任当前任务类型。
+- **纯能力排序，不看价格**。日常 capability 路由的省钱靠 `max_cost_tier` 圈定候选池实现（池内按纯能力评分选最强），评分本身不掺价格权重；级联升级同样只比能力——升级只在便宜模型已经失败后才发生，这时诉求是"把事做对"，不是省钱。
 - **升一档，不直接拉满**。从"能力高于当前模型"的可用模型里，选评分最接近的**下一档**，逐步试探；配合 `max_retries` 可多次升级，避免一道小坎就动用最贵的旗舰。
 - **和 capability 选模同源**。无论当前模型是策略写死的（`route_to`）还是系统自选的，升级都用同一套能力评分体系，不会出现"升级反而换到更弱模型"的情况。
 
@@ -771,8 +726,7 @@ PolicyFlow/
 │   ├── anthropic_adapter.py # Anthropic Messages API ↔ OpenAI 协议适配
 │   ├── policy.py         # 策略数据模型
 │   ├── classifier.py     # Embedding 分类器（含关键词复核）
-│   ├── router.py         # 路由决策引擎
-│   ├── modifiers.py      # 4 个智能修饰器（Agent/推理/会话/窗口）
+│   ├── router.py         # 路由决策引擎（含会话承接 + 统一兜底）
 │   ├── cascade.py        # 级联验证器 + LLM-as-Judge
 │   ├── db.py             # SQLite 日志层
 │   ├── cost.py           # 39 个模型定价

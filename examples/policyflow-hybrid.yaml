@@ -139,11 +139,6 @@ policies_hybrid:
       max_input_tokens: 150
     max_cost_tier: cheap      # 自动识别为通用问答，限制 cheap 档省钱
 
-  - name: "默认"
-    match:
-      default: true
-    route_to: "deepseek-v4-pro"           # ← 兜底锁死，别让系统乱选
-
 # ── Cascade ───────────────────────────────────────────────────────────
 cascade:
   enabled: true
@@ -153,16 +148,6 @@ cascade:
     - "deepseek-v4-pro"
     - "claude-sonnet-4-6"
   max_retries: 2
-
-# ── Modifiers ─────────────────────────────────────────────────────────
-modifiers:
-  agent_detection: true
-  reasoning_detection: true
-  context_window_filter: true
-  session_persistence: true
-  session_ttl: 1800
-  strongest_model: "auto"
-  reasoning_model: "auto"
 
 # ── Optimizer ─────────────────────────────────────────────────────────
 optimizer:
