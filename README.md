@@ -37,6 +37,8 @@
 - **双维静默容灾。** 提供“供应商”与“模型”两层保障：支持同模型多 Provider 轮询，主Provider挂了（断连、额度耗尽）自动切备用Provider；同时每个任务支持配置 Top-3 候选模型，主模型不可用时秒切备选。双重防线兜底，全程无感，丝滑 Coding。
 - **省了多少全记着。** 每条请求记入 SQLite——走了哪个策略、花了多少钱、和 baseline 比省了多少。有全屏 TUI 仪表盘，有 AI 优化引擎（分析日志出建议），有 CLI export 给你二次分析。
 
+> 想看内部怎么路由？跳到 [#核心流程](#核心流程)。
+
 ## 怎么用
 
 PolicyFlow 运行在你的本地环境（默认监听 localhost:8000）。你只需把手头 AI 工具的 API Base URL 指向它，剩下的调度工作全部自动完成。不改代码、不存 Key、不碰数据。 它不属于任何第三方中介，就是一个完全透明的私有本地代理。
@@ -53,44 +55,6 @@ PolicyFlow 运行在你的本地环境（默认监听 localhost:8000）。你只
            └─ 把响应原样返回（附 X-PolicyFlow-* 头，告诉你走了哪个策略）
 
   响应回你的工具，和直连供应商一样。
-```
-
-## 核心流程
-
-```
-你的客户端（Cursor / Claude Code / Codex CLI / Aider / ChatBox / OpenAI SDK 等）
-  发请求过来 →
-    OpenAI 兼容协议  → POST http://localhost:8000/v1/chat/completions
-    Anthropic 原生协议 → POST http://localhost:8000/v1/messages   （Claude Code 等 Anthropic 原生客户端用）
-  请求体: { model: "gpt-4o", messages: [...], tools?: [...] }
-  │
-  ↓ PolicyFlow 收到后依次跑下面 4 步
-  │
-  ├── ① 策略匹配（按 YAML policies 从上到下扫，只看当前轮最新一条用户消息）
-  │     图片检测 → 命中即停
-  │     关键词精确匹配命中 → Embedding 复核语境（≥阈值 才放行，挡掉"苹果"匹"苹果手机"这类歧义）
-  │     未命中 → Embedding 全局语义匹配
-  │     仍未命中 → 看会话记忆：本会话上一轮有模型则沿用（承接 "继续" 这类无语义跟进），
-  │                否则走统一兜底模型（fallback_model）
-  │     → 命中后确定任务类型（如"代码生成"、"复杂推理"）
-  │
-  ├── ② 路由决策：根据任务类型选模型
-  │     策略写了 route_to → 直接用
-  │     没写 route_to → 按任务类型的 8 维能力权重对可用模型打分，Top-3 加权随机（90/7/3）
-  │     选定 model → 查 providers 映射 → 改写 model 字段 + 切对应 base_url
-  │
-  ├── ③ 级联验证（仅当策略 cascade: true）
-  │     模型作答 → 规则验证器 / LLM Judge 评估
-  │     不通过 → 沿能力评分升一档重试（最多 max_retries 次）
-  │
-  └── ④ 成本记录   SQLite 写一行：策略命中、最终模型、token、
-                   费用、judge 反馈 —— 供 report / optimize 命令分析
-
-CLI 工具：
-  policyflow report   → 全屏 TUI 仪表盘(成本/策略/模型/日趋势)
-  policyflow classify → 测试路由("这句话会匹配到哪个策略?")
-  policyflow optimize → AI 优化建议(分析日志,推荐新策略)
-  policyflow export   → 导出 CSV 日志
 ```
 
 ## 快速开始
@@ -333,6 +297,17 @@ cp policyflow.example.yaml policyflow.yaml
 docker compose up -d
 ```
 
+## 一键启动
+
+```bash
+scripts\launcher.bat    # 双击或命令行运行
+
+  [1] Dashboard   全屏仪表盘
+  [2] Serve       启动代理 (0.0.0.0:8000)
+  [3] Classify    测试路由
+  [Q] Quit
+```
+
 ## CLI 命令
 
 > 无需启动服务，直接运行即可。如果用了虚拟环境，先激活：`.venv\Scripts\activate`（Windows）或 `source .venv/bin/activate`（Linux/Mac）。
@@ -376,15 +351,42 @@ python -m policyflow optimize --since 30d
 
 > 提示：Windows 用户可直接双击 `scripts\launcher.bat` 一键启动仪表盘或服务。
 
-## 一键启动
+## 核心流程
 
-```bash
-scripts\launcher.bat    # 双击或命令行运行
+```
+你的客户端（Cursor / Claude Code / Codex CLI / Aider / ChatBox / OpenAI SDK 等）
+  发请求过来 →
+    OpenAI 兼容协议  → POST http://localhost:8000/v1/chat/completions
+    Anthropic 原生协议 → POST http://localhost:8000/v1/messages   （Claude Code 等 Anthropic 原生客户端用）
+  请求体: { model: "gpt-4o", messages: [...], tools?: [...] }
+  │
+  ↓ PolicyFlow 收到后依次跑下面 4 步
+  │
+  ├── ① 策略匹配（按 YAML policies 从上到下扫，只看当前轮最新一条用户消息）
+  │     图片检测 → 命中即停
+  │     关键词精确匹配命中 → Embedding 复核语境（≥阈值 才放行，挡掉"苹果"匹"苹果手机"这类歧义）
+  │     未命中 → Embedding 全局语义匹配
+  │     仍未命中 → 看会话记忆：本会话上一轮有模型则沿用（承接 "继续" 这类无语义跟进），
+  │                否则走统一兜底模型（fallback_model）
+  │     → 命中后确定任务类型（如"代码生成"、"复杂推理"）
+  │
+  ├── ② 路由决策：根据任务类型选模型
+  │     策略写了 route_to → 直接用
+  │     没写 route_to → 按任务类型的 8 维能力权重对可用模型打分，Top-3 加权随机（90/7/3）
+  │     选定 model → 查 providers 映射 → 改写 model 字段 + 切对应 base_url
+  │
+  ├── ③ 级联验证（仅当策略 cascade: true）
+  │     模型作答 → 规则验证器 / LLM Judge 评估
+  │     不通过 → 沿能力评分升一档重试（最多 max_retries 次）
+  │
+  └── ④ 成本记录   SQLite 写一行：策略命中、最终模型、token、
+                   费用、judge 反馈 —— 供 report / optimize 命令分析
 
-  [1] Dashboard   全屏仪表盘
-  [2] Serve       启动代理 (0.0.0.0:8000)
-  [3] Classify    测试路由
-  [Q] Quit
+CLI 工具：
+  policyflow report   → 全屏 TUI 仪表盘(成本/策略/模型/日趋势)
+  policyflow classify → 测试路由("这句话会匹配到哪个策略?")
+  policyflow optimize → AI 优化建议(分析日志,推荐新策略)
+  policyflow export   → 导出 CSV 日志
 ```
 
 ## 策略配置
