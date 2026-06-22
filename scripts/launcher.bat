@@ -40,7 +40,28 @@ if %CH%==1 goto :dashboard
 exit /b 0
 
 :dashboard
-python -m policyflow report %*
+cls
+echo.
+echo   +==========================================+
+echo   ^|   Dashboard time period                   ^|
+echo   +==========================================+
+echo   ^|                                          ^|
+echo   ^|   [7]  Last 7 days     (recent traffic)   ^|
+echo   ^|   [3]  Last 30 days    (monthly overview) ^|
+echo   ^|   [A]  All time        (full history)    ^|
+echo   ^|                                          ^|
+echo   +==========================================+
+echo.
+choice /c 73A /n /m "  Select period [7, 3, or A for all]: "
+set DP=%errorlevel%
+
+if %DP%==1 set SINCE_DAYS=7d
+if %DP%==2 set SINCE_DAYS=30d
+if %DP%==3 set SINCE_DAYS=3650d
+
+cls
+echo  Loading dashboard...
+python -m policyflow report --since %SINCE_DAYS%
 goto :menu
 
 :serve

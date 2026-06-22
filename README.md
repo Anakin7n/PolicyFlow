@@ -1,8 +1,10 @@
 # PolicyFlow 🐙
 
-> 该省省该花花，一个替你的请求挑对模型的本地智能路由。实测省 40-65%。
+> 该省省该花花，一个替你的请求挑对模型的本地智能路由。
 
-**用旗舰模型回一句”你好，在吗”，就像开着跑车去菜市场——不是不能用，是不值当。**
+<p align="center"><img src="docs/images/banner.png" alt="PolicyFlow" /></p>
+
+**用旗舰模型回一句"你好，在吗"，就像开着跑车去菜市场——不是不能用，是不值当。**
 
 PolicyFlow 做的就是这样一件事：识别每次请求的真实难度，简单任务交给便宜模型处理，复杂任务保留顶级算力。它不靠猜测——你定义 YAML 策略，它自动改写 model 字段、切换对应的 API 端点。API 成本通常省下 40-65%，经上千次真实请求测试的中位数约 58%。
 
@@ -26,12 +28,12 @@ PolicyFlow 做的就是这样一件事：识别每次请求的真实难度，简
   单次会话省 30%。日常流量里翻译/闲聊/格式化这类轻任务占大多数
   （~70%），实际月省更高。经1000多次真实请求测试后约省 58%。
 ```
-## “从裸调 API 到智能调度，PolicyFlow 能做什么？”
+## "从裸调 API 到智能调度，PolicyFlow 能做什么？"
 
 - **YAML 即策略，改一行生效。** 不写死在代码里——今天觉得"翻译"该走便宜模型，打开 yaml 把 max_cost_tier 从 mid 改成 cheap，重启即生效。
 - **两种方式自由组合。** 想精确控制？写 `route_to` 把这任务钉死到一个模型，你说翻译任务用豆包，我就用豆包。想省心？算法帮你选， 8 维能力分（编码、推理、写作、多语言……），12个任务类型各有对应的八个维度权重。翻译看重写作和多语言，架构看重编码和推理，帮你选出最合适的那一个。
 - **自建 Key 和平台套餐统一调度，规则透明。** 各大模型的直连 Key、各厂商Coding Plan的聚合 Key（一个 Key 下挂 Kimi/GLM/豆包/MiniMax 等多个模型）在同一条 YAML 里管理，策略统一分配到各自端点。平台 auto 的局限在于：规则不透明（无法解释为何选 A 不选 B），范围局限于套餐内模型，无法纳入自建 Key。PolicyFlow 取消了这两条边界——所有来源的模型在同一任务维度下按同一套能力评分竞争，你定策略，你来dispatch，逻辑完全可见。
-- **双维静默容灾。** 提供“供应商”与“模型”两层保障：支持同模型多 Provider 轮询，主Provider挂了（断连、额度耗尽）自动切备用Provider；同时每个任务支持配置 Top-3 候选模型，主模型不可用时秒切备选。双重防线兜底，全程无感，丝滑 Coding。
+- **双维静默容灾。** 提供"供应商"与"模型"两层保障：支持同模型多 Provider 轮询，主Provider挂了（断连、额度耗尽）自动切备用Provider；同时每个任务支持配置 Top-3 候选模型，主模型不可用时秒切备选。双重防线兜底，全程无感，丝滑 Coding。
 - **省了多少全记着。** 每条请求记入 SQLite——走了哪个策略、花了多少钱、和 baseline 比省了多少。有全屏 TUI 仪表盘，有 AI 优化引擎（分析日志出建议），有 CLI export 给你二次分析。
 
 > 想看内部怎么路由？跳到 [#核心流程](#核心流程)。
@@ -300,11 +302,14 @@ docker compose up -d
 ```bash
 scripts\launcher.bat    # 双击或命令行运行
 
-  [1] Dashboard   全屏仪表盘
+  [1] Dashboard   全屏仪表盘  → 选择 7d / 30d / 全部
   [2] Serve       启动代理 (0.0.0.0:8000)
   [3] Classify    测试路由
+  [4] Mode        切换路由模式 (hybrid/capability/explicit)
   [Q] Quit
 ```
+
+![PolicyFlow Launcher](docs/images/launcher.png)
 
 ## CLI 命令
 
@@ -312,14 +317,21 @@ scripts\launcher.bat    # 双击或命令行运行
 
 ### report——全屏仪表盘
 
-Textual 响应式 TUI 仪表盘，包含六个模块卡片，支持独立滚动：
+Textual 响应式 TUI 仪表盘，七个模块卡片，支持独立滚动：
 
-- **Stats** — 总请求数/花费/节省/级联率
+- **Stats** — 总请求 / 花费 / 节省 / 匹配质量 (Direct / Indirect / Failed)
 - **Policy Distribution** — 各策略花费占比柱状图
-- **Model Usage by Provider** — 供应商→模型两级花费分解
+- **Model Usage by Provider** — 供应商 → 模型两级花费分解
+- **Auto-Routing by Task Type** — capability 模式下的任务类型分布
 - **Daily Cost Comparison** — 每日实际 vs 基准对比，含节省金额
-- **Recent Requests** — 最近请求明细（可滚动）
 - **AI Optimization** — 内嵌优化建议
+- **Recent Requests** — 最近请求明细（可滚动）
+
+![Dashboard — Auto-Routing](docs/images/dashboard-2.png)
+
+![Dashboard — Daily Cost, Optimization & Recent](docs/images/dashboard-3.png)
+
+![Dashboard — Stats & Policy Distribution & Model Usage](docs/images/dashboard-1.png)
 
 ```bash
 python -m policyflow report
