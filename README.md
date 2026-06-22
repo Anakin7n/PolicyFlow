@@ -182,6 +182,7 @@ providers:
   anthropic:
     base_url: https://api.anthropic.com
     api_key: "${ANTHROPIC_API_KEY}"
+    protocol: anthropic            # 直连 Anthropic 官方 API 才需要；中转站/聚合器不用
     models:
       - "claude-haiku-4-5"
       - "claude-sonnet-4-6"
@@ -372,7 +373,7 @@ python -m policyflow optimize --since 30d
   │     没写 route_to → 按任务类型的 8 维能力权重对可用模型打分，Top-3 加权随机（90/7/3）
   │     选定 model → 查 providers 映射 → 改写 model 字段 + 切对应 base_url
   │
-  ├── ③ 级联验证（仅当策略 cascade: true）
+  ├── ③ 级联验证（仅非流式请求）
   │     模型作答 → 规则验证器 / LLM Judge 评估
   │     不通过 → 沿能力评分升一档重试（最多 max_retries 次）
   │
@@ -456,7 +457,6 @@ policies:
       keywords: ["翻译", "摘要", "润色", "纠错", "格式化"]
       max_input_tokens: 800    # 可选：限制输入长度
     route_to: "deepseek-v4-flash"
-    cascade: true               # 启用级联验证
 ```
 
 **复核阈值在 `embedding.verify_threshold` 配置**（默认 0.55），调高 → 关键词更容易被推翻，调低 → 关键词更被信任。Embedding API 不可达时跳过复核、直接信任关键词命中（降级路径）。
@@ -548,7 +548,7 @@ cost_tiers:
 
 ## 多供应商路由
 
-PolicyFlow 支持将不同模型路由到不同的 API 供应商。无需额外的 API 集成 — DeepSeek、Qwen、Anthropic 都支持 OpenAI 兼容格式。
+PolicyFlow 支持将不同模型路由到不同的 API 供应商。DeepSeek、Qwen 等走 OpenAI 兼容格式；Anthropic 官方 API 通过 `protocol: anthropic` 声明走 Anthropic Messages 协议。中转站/聚合器（OpenRouter、OneAPI、Codex Plus 等）统一走 OpenAI 格式。
 
 ```
 策略匹配 → 路由到 "qwen-max"
@@ -596,7 +596,7 @@ PolicyFlow 有三层独立的容灾/升级机制，各司其职：
 |---|---|---|---|
 | **Provider 容灾** | 当前模型的某个供应商挂了 | 同一模型换下一个供应商 | 永远生效，无需配置 |
 | **模型容灾** | capability 选中的模型所有供应商全挂 | 换综合评分 Top-2 模型 | 仅 capability 模式自动生效 |
-| **质量级联** | 回答质量不达标（规则或 AI 判定） | 换纯能力评分更高一档的模型 | 策略级 `cascade: true` 控制 |
+| **质量级联** | 回答质量不达标（规则判定） | 换纯能力评分更高一档的模型 | 全局 `cascade.enabled` 控制 |
 
 > route_to 的模型走 Provider 容灾 → upstream.fallback_model → 502
 

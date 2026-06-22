@@ -64,7 +64,6 @@ policies_hybrid:
       ]
       max_input_tokens: 800
     route_to: "qwen-flash"
-    cascade: true
 
   - name: "文本创作与写作"
     match:

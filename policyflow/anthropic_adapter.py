@@ -116,6 +116,10 @@ def _convert_user_blocks(blocks: list[dict[str, Any]]) -> list[PFMessage]:
 
     result: list[PFMessage] = []
 
+    # Tool messages MUST come before the user text message: OpenAI requires
+    # each assistant tool_calls to be immediately followed by tool messages.
+    result.extend(tool_msgs)
+
     if image_parts:
         content_array: list[dict[str, Any]] = []
         for t in text_parts:
@@ -125,7 +129,6 @@ def _convert_user_blocks(blocks: list[dict[str, Any]]) -> list[PFMessage]:
     elif text_parts:
         result.append(PFMessage(role="user", content="\n".join(text_parts)))
 
-    result.extend(tool_msgs)
     return result
 
 
@@ -202,6 +205,100 @@ def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] |
             },
         })
     return result
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Reverse conversion: OpenAI Chat Completions → Anthropic Messages
+# (for forwarding to Anthropic-native providers)
+# ═════════════════════════════════════════════════════════════════════
+
+def openai_to_anthropic_request(openai_req: ChatCompletionRequest) -> dict[str, Any]:
+    """Convert an OpenAI ChatCompletionRequest back to Anthropic Messages body.
+
+    This is the reverse of ``anthropic_to_chat_request`` — used when PolicyFlow
+    routes to a provider with ``protocol: anthropic`` (e.g. api.anthropic.com).
+    """
+    messages = list(openai_req.messages)
+    system = None
+    anthropic_messages: list[dict[str, Any]] = []
+
+    # Pull out the system message (OpenAI role="system" → Anthropic top-level "system")
+    if messages and messages[0].role == "system":
+        system = messages[0].content
+        messages = messages[1:]
+
+    for msg in messages:
+        entry: dict[str, Any] = {"role": msg.role}
+        if msg.tool_calls:
+            # Assistant with tool_calls → Anthropic content blocks
+            blocks: list[dict[str, Any]] = []
+            if msg.content:
+                blocks.append({"type": "text", "text": msg.content})
+            for tc in msg.tool_calls:
+                fn = tc.get("function", {})
+                try:
+                    inp = json.loads(fn.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    inp = {}
+                blocks.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:12]}"),
+                    "name": fn.get("name", ""),
+                    "input": inp,
+                })
+            entry["content"] = blocks
+        elif msg.role == "tool":
+            # OpenAI role="tool" → Anthropic tool_result content block in user message
+            prev = anthropic_messages[-1] if anthropic_messages else None
+            if prev and prev["role"] == "user" and isinstance(prev.get("content"), list):
+                prev["content"].append({
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id or "",
+                    "content": msg.content or "",
+                })
+                continue  # merged into previous user message
+            else:
+                entry["role"] = "user"
+                entry["content"] = [{
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id or "",
+                    "content": msg.content or "",
+                }]
+        else:
+            entry["content"] = msg.content or ""
+        anthropic_messages.append(entry)
+
+    # Tools: OpenAI format → Anthropic format
+    anthropic_tools = None
+    oai_tools = (openai_req.extra or {}).get("tools")
+    if oai_tools:
+        anthropic_tools = []
+        for t in oai_tools:
+            fn = t.get("function", {})
+            anthropic_tools.append({
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "input_schema": fn.get("parameters", {}),
+            })
+
+    body: dict[str, Any] = {
+        "model": openai_req.model,
+        "messages": anthropic_messages,
+        "max_tokens": openai_req.max_tokens or 1024,
+        "stream": openai_req.stream,
+    }
+    if system:
+        body["system"] = system
+    if openai_req.temperature is not None:
+        body["temperature"] = openai_req.temperature
+    if openai_req.top_p is not None:
+        body["top_p"] = openai_req.top_p
+    if openai_req.stop:
+        body["stop_sequences"] = openai_req.stop if isinstance(openai_req.stop, list) else [openai_req.stop]
+    if anthropic_tools:
+        body["tools"] = anthropic_tools
+
+    return body
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -446,7 +543,7 @@ class AnthropicStreamConverter:
         events.append(_sse("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": self._finish_reason, "stop_sequence": None},
-            "usage": {"output_tokens": self._output_tokens},
+            "usage": {"input_tokens": self._input_tokens, "output_tokens": self._output_tokens},
         }))
 
         # Stop

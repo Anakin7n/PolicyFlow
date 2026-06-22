@@ -1,17 +1,23 @@
 """Upstream proxy — forwards requests to vendor APIs directly.
 
-Supports multi-provider routing: each provider (DeepSeek, Anthropic, OpenAI, etc.)
-has its own httpx client with its own base_url and api_key.
+Supports multi-provider routing with protocol awareness.  Providers with
+``protocol: anthropic`` receive Anthropic Messages API requests (converted
+from OpenAI format on the fly); all others receive standard OpenAI Chat
+Completions.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import AsyncIterator
 
 import httpx
 
 from .config import Config
 from .models import ChatCompletionRequest, ChatCompletionResponse
+
+logger = logging.getLogger(__name__)
 
 
 class ProxyError(Exception):
@@ -80,7 +86,13 @@ class UpstreamProxy:
         self._clients.clear()
 
     def _chat_path(self, provider_name: str | None) -> str:
-        """Build the chat-completions path for a provider.
+        """Build the chat-completions path for a provider."""
+        if provider_name and self._is_anthropic(provider_name):
+            return "/v1/messages"
+        return self._openai_chat_path(provider_name)
+
+    def _openai_chat_path(self, provider_name: str | None) -> str:
+        """Build the OpenAI chat-completions path for a provider.
 
         If the provider's base_url already ends in an API version segment
         (…/v1, /v2, /v3, /v4), only append '/chat/completions' — otherwise
@@ -96,6 +108,124 @@ class UpstreamProxy:
         if re.search(r"/v\d+$", base.rstrip("/")):
             return "/chat/completions"
         return "/v1/chat/completions"
+
+    def _is_anthropic(self, provider_name: str | None) -> bool:
+        """Check if a provider uses the Anthropic Messages protocol."""
+        if not provider_name:
+            return False
+        return self.config.get_provider_protocol(provider_name) == "anthropic"
+
+    def _build_payload(
+        self, request: ChatCompletionRequest, provider_name: str | None,
+    ) -> dict:
+        """Build the JSON payload for the upstream request.
+
+        For Anthropic providers, converts OpenAI format to Anthropic Messages.
+        For OpenAI providers, serializes as-is.
+        """
+        if self._is_anthropic(provider_name):
+            from .anthropic_adapter import openai_to_anthropic_request
+            return openai_to_anthropic_request(request)
+        payload = request.model_dump(exclude_none=True, exclude={"extra"})
+        payload.update(request.extra or {})
+        return payload
+
+    @staticmethod
+    def _parse_anthropic_stream_chunk(chunk: bytes) -> list[bytes]:
+        """Parse one Anthropic SSE chunk and convert to OpenAI SSE bytes.
+
+        Anthropic streaming yields SSE events like:
+            event: content_block_delta
+            data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}
+
+        We convert these to OpenAI SSE chunks:
+            data: {"choices":[{"delta":{"content":"Hi"}}]}
+        """
+        text = chunk.decode("utf-8", errors="replace")
+        lines = text.split("\n")
+        result: list[bytes] = []
+        current_event: dict[str, str] = {}
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("event:"):
+                current_event["event"] = line[6:].strip()
+            elif line.startswith("data:"):
+                current_event["data"] = line[5:].strip()
+
+            # When we have a complete event pair, convert it
+            if "event" in current_event and "data" in current_event:
+                evt = current_event.pop("event")
+                data_str = current_event.pop("data")
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                if evt == "content_block_delta":
+                    delta = data.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text_content = delta.get("text", "")
+                        oai_chunk = json.dumps({
+                            "choices": [{"index": 0, "delta": {"content": text_content}}],
+                        }, ensure_ascii=False)
+                        result.append(f"data: {oai_chunk}\n\n".encode("utf-8"))
+                elif evt == "message_delta":
+                    usage = data.get("usage", {})
+                    finish = data.get("delta", {}).get("stop_reason", "end_turn")
+                    oai_finish = {"end_turn": "stop", "max_tokens": "length", "tool_use": "tool_calls"}.get(finish, "stop")
+                    oai_chunk = json.dumps({
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": oai_finish}],
+                        "usage": {
+                            "prompt_tokens": usage.get("input_tokens", 0),
+                            "completion_tokens": usage.get("output_tokens", 0),
+                            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+                        },
+                    }, ensure_ascii=False)
+                    result.append(f"data: {oai_chunk}\n\n".encode("utf-8"))
+                elif evt == "message_stop":
+                    result.append(b"data: [DONE]\n\n")
+
+        return result
+
+    @staticmethod
+    def _parse_anthropic_response(body: dict) -> dict:
+        """Convert an Anthropic Messages response to OpenAI ChatCompletion format."""
+        content_blocks = body.get("content", [])
+        text = ""
+        tool_calls = []
+        for block in content_blocks:
+            if block.get("type") == "text":
+                text += block.get("text", "")
+            elif block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": block.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(block.get("input", {})),
+                    },
+                })
+        stop_reason = body.get("stop_reason", "end_turn")
+        finish = {"end_turn": "stop", "max_tokens": "length", "tool_use": "tool_calls"}.get(stop_reason, "stop")
+        usage = body.get("usage", {})
+        return {
+            "id": body.get("id", ""),
+            "object": "chat.completion",
+            "model": body.get("model", ""),
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": text, "tool_calls": tool_calls or None},
+                "finish_reason": finish,
+            }],
+            "usage": {
+                "prompt_tokens": usage.get("input_tokens", 0),
+                "completion_tokens": usage.get("output_tokens", 0),
+                "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+            },
+        }
 
     async def _post(
         self, path: str, payload: dict, provider_name: str | None = None,
@@ -121,10 +251,16 @@ class UpstreamProxy:
     async def chat_completion(
         self, request: ChatCompletionRequest, provider_name: str | None = None,
     ) -> ChatCompletionResponse:
-        """Forward a non-streaming chat completion request upstream."""
-        payload = request.model_dump(exclude_none=True, exclude={"extra"})
-        payload.update(request.extra or {})
+        """Forward a non-streaming chat completion request upstream.
+
+        For Anthropic-protocol providers, converts the request to Anthropic
+        Messages format and the response back to OpenAI ChatCompletion.
+        """
+        payload = self._build_payload(request, provider_name)
         response = await self._post(self._chat_path(provider_name), payload, provider_name)
+        if self._is_anthropic(provider_name):
+            data = self._parse_anthropic_response(response.json())
+            return ChatCompletionResponse(**data)
         return ChatCompletionResponse(**response.json())
 
     async def chat_completion_with_fallback(
@@ -185,14 +321,46 @@ class UpstreamProxy:
         """Forward a streaming chat completion request upstream.
 
         Yields raw SSE bytes from the upstream, one chunk at a time.
+        For Anthropic providers, converts Anthropic SSE → OpenAI SSE on the fly.
         """
         client = self._get_client(provider_name)
         label = self._provider_label(provider_name)
-        payload = request.model_dump(exclude_none=True, exclude={"extra"})
-        payload.update(request.extra or {})
+        payload = self._build_payload(request, provider_name)
+        is_anthropic = self._is_anthropic(provider_name)
 
         try:
             async with client.stream("POST", self._chat_path(provider_name), json=payload) as response:
+                if response.status_code != 200:
+                    body = await response.aread()
+                    raise ProxyError(
+                        f"Upstream returned {response.status_code}: {body[:500]}",
+                        status_code=response.status_code,
+                    )
+                async for chunk in response.aiter_bytes():
+                    if is_anthropic:
+                        for oai_chunk in self._parse_anthropic_stream_chunk(chunk):
+                            yield oai_chunk
+                    else:
+                        yield chunk
+        except httpx.ConnectError:
+            raise ProxyError(f"Cannot connect to upstream {label}", status_code=0)
+        except httpx.TimeoutException:
+            raise ProxyError(f"Upstream request timed out: {label}", status_code=0)
+        except httpx.StreamError as e:
+            raise ProxyError(f"Stream error from upstream {label}: {e}", status_code=0)
+
+    async def anthropic_messages_stream(
+        self, anthropic_body: dict, provider_name: str,
+    ) -> AsyncIterator[bytes]:
+        """Forward a raw Anthropic Messages request, yield raw SSE bytes.
+
+        Used by /v1/messages when routing to an Anthropic provider,
+        avoiding the OpenAI roundtrip entirely.
+        """
+        client = self._get_client(provider_name)
+        label = self._provider_label(provider_name)
+        try:
+            async with client.stream("POST", "/v1/messages", json=anthropic_body) as response:
                 if response.status_code != 200:
                     body = await response.aread()
                     raise ProxyError(
@@ -207,6 +375,28 @@ class UpstreamProxy:
             raise ProxyError(f"Upstream request timed out: {label}", status_code=0)
         except httpx.StreamError as e:
             raise ProxyError(f"Stream error from upstream {label}: {e}", status_code=0)
+
+    async def anthropic_messages(
+        self, anthropic_body: dict, provider_name: str,
+    ) -> dict:
+        """Forward a raw Anthropic Messages request, return JSON response.
+
+        Used by /v1/messages when routing to an Anthropic provider.
+        """
+        client = self._get_client(provider_name)
+        label = self._provider_label(provider_name)
+        try:
+            response = await client.post("/v1/messages", json=anthropic_body)
+        except httpx.ConnectError:
+            raise ProxyError(f"Cannot connect to upstream {label}", status_code=0)
+        except httpx.TimeoutException:
+            raise ProxyError(f"Upstream request timed out: {label}", status_code=0)
+        if response.status_code != 200:
+            raise ProxyError(
+                f"Upstream returned {response.status_code}: {response.text[:500]}",
+                status_code=response.status_code,
+            )
+        return response.json()
 
     async def list_models(self) -> dict:
         """Proxy the /v1/models endpoint (uses default upstream)."""

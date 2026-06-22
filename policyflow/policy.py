@@ -17,7 +17,6 @@ class Policy:
     min_input_tokens: int | None = None
     has_image: bool = False
     default: bool = False
-    cascade: bool = False
     specialty: str = ""              # capability-aware auto-select (新)
     max_cost_tier: str = ""          # budget constraint: cheap|mid|expensive
 
@@ -33,7 +32,6 @@ class Policy:
             min_input_tokens=match.get("min_input_tokens"),
             has_image=match.get("has_image", False),
             default=match.get("default", False),
-            cascade=data.get("cascade", False),
             specialty=data.get("specialty", ""),
             max_cost_tier=data.get("max_cost_tier", ""),
         )

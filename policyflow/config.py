@@ -142,7 +142,7 @@ class Config:
         return self._model_provider.get(model_id, [])
 
     def get_provider_config(self, provider_name: str) -> dict:
-        """Return {base_url, api_key, timeout} for a provider."""
+        """Return {base_url, api_key, timeout, protocol} for a provider."""
         providers = self.data.get("providers", {})
         if isinstance(providers, dict):
             cfg = providers.get(provider_name, {})
@@ -150,13 +150,19 @@ class Config:
                 "base_url": cfg.get("base_url", self.upstream_base_url),
                 "api_key": cfg.get("api_key", self.upstream_api_key),
                 "timeout": cfg.get("timeout", self.upstream_timeout),
+                "protocol": cfg.get("protocol", "openai"),
             }
         # Fallback to default upstream
         return {
             "base_url": self.upstream_base_url,
             "api_key": self.upstream_api_key,
             "timeout": self.upstream_timeout,
+            "protocol": "openai",
         }
+
+    def get_provider_protocol(self, provider_name: str) -> str:
+        """Return 'openai' or 'anthropic' for a provider."""
+        return self.get_provider_config(provider_name).get("protocol", "openai")
 
     @property
     def upstream_base_url(self) -> str:

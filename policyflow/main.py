@@ -23,9 +23,14 @@ from .db import hash_prompt
 from .cascade import CascadeConfig, CascadeValidator
 from .config import Config
 from .cost import calc_compared_cost, calc_cost
-from .models import ChatCompletionRequest, ChatCompletionResponse, Message, ModelsResponse
+from .models import ChatCompletionRequest, ChatCompletionResponse, Message, ModelsResponse, Choice, Usage
 from .proxy import ProxyError, UpstreamProxy
 from .router import Router
+
+def _safe_header(value: str) -> str:
+    """URL-encode a header value so it survives latin-1 encoding (HTTP spec)."""
+    import urllib.parse
+    return urllib.parse.quote(value, safe="")
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -141,14 +146,24 @@ async def anthropic_messages(
         original_model, openai_req.model, route_method, route_score,
     )
 
-    # ── 3. Forward (non-streaming only for cascade support) ────
+    # ── 3. Forward ──────────────────────────────────────────────
+    # When routing to an Anthropic-native provider, forward the raw
+    # Anthropic body directly — no OpenAI roundtrip needed.
+    provider_name = proxy.config.get_model_provider(openai_req.model)
+    is_anthropic_target = proxy.config.get_provider_protocol(provider_name or "") == "anthropic"
+
     if stream:
         try:
-            provider_name = proxy.config.get_model_provider(openai_req.model)
-            converter = AnthropicStreamConverter(openai_req.model)
-            sse_stream = _anthropic_stream_wrapper(
-                proxy, openai_req, provider_name, converter,
-            )
+            if is_anthropic_target:
+                # Update model in the original Anthropic body and forward raw
+                raw_body = dict(anthropic_body)
+                raw_body["model"] = openai_req.model
+                raw_stream = proxy.anthropic_messages_stream(raw_body, provider_name)
+            else:
+                converter = AnthropicStreamConverter(openai_req.model)
+                raw_stream = _anthropic_stream_wrapper(
+                    proxy, openai_req, provider_name, converter,
+                )
             log_params = {
                 "user": user, "original_model": original_model,
                 "routed_model": openai_req.model, "policy_name": route_policy_name,
@@ -157,17 +172,42 @@ async def anthropic_messages(
                 "prompt_preview": prompt_preview_val,
                 "baseline_model": config.baseline_model,
             }
-            wrapped = _stream_with_logging(sse_stream, log_params)
+            wrapped = _stream_with_logging(raw_stream, log_params)
             return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score)
         except Exception:
             success = False
             raise
     else:
         try:
-            cascade_specialty = decision.policy.name if decision.policy else ""
-            response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
-                proxy, cascade, openai_req, decision, cascade_specialty, available_models,
-            )
+            if is_anthropic_target:
+                # Forward raw Anthropic body, skip cascade (Anthropic-native)
+                raw_body = dict(anthropic_body)
+                raw_body["model"] = openai_req.model
+                raw_body["stream"] = False
+                anthropic_resp = await proxy.anthropic_messages(raw_body, provider_name)
+                # Build a minimal OpenAI response for logging compatibility
+                content = anthropic_resp.get("content", [])
+                text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+                response = ChatCompletionResponse(
+                    model=openai_req.model,
+                    choices=[Choice(index=0, message=Message(role="assistant", content=text), finish_reason="stop")],
+                    usage=Usage(
+                        prompt_tokens=anthropic_resp.get("usage", {}).get("input_tokens", 0),
+                        completion_tokens=anthropic_resp.get("usage", {}).get("output_tokens", 0),
+                    ),
+                )
+                cascade_attempts = 1
+            else:
+                cascade_specialty = decision.policy.name if decision.policy else ""
+                available_models = config.available_models
+                response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
+                    proxy, cascade, openai_req, decision, cascade_specialty, available_models,
+                )
+                # Convert OpenAI response → Anthropic format
+                anthropic_resp = openai_to_anthropic_response(
+                    response.model_dump(exclude_none=True),
+                    routed_model=openai_req.model,
+                )
         except HTTPException:
             success = False
             raise
@@ -193,16 +233,11 @@ async def anthropic_messages(
                 baseline_model=config.baseline_model,
             )
 
-        # Convert OpenAI response → Anthropic format
-        anthropic_resp = openai_to_anthropic_response(
-            response.model_dump(exclude_none=True),
-            routed_model=openai_req.model,
-        )
         return JSONResponse(
             content=anthropic_resp,
             headers={
-                "X-PolicyFlow-Policy": route_policy_name,
-                "X-PolicyFlow-Method": route_method,
+                "X-PolicyFlow-Policy": _safe_header(route_policy_name),
+                "X-PolicyFlow-Method": _safe_header(route_method),
                 "X-PolicyFlow-Score": f"{route_score:.3f}",
                 "X-PolicyFlow-Model": openai_req.model,
             },
@@ -288,6 +323,7 @@ async def chat_completions(
             return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score)
         else:
             cascade_specialty = decision.policy.name if decision.policy else ""
+            available_models = config.available_models
             response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
                 proxy, cascade, request, decision, cascade_specialty, available_models,
             )
@@ -321,8 +357,8 @@ async def chat_completions(
     return JSONResponse(
         content=response.model_dump(exclude_none=True),
         headers={
-            "X-PolicyFlow-Policy": route_policy_name,
-            "X-PolicyFlow-Method": route_method,
+            "X-PolicyFlow-Policy": _safe_header(route_policy_name),
+            "X-PolicyFlow-Method": _safe_header(route_method),
             "X-PolicyFlow-Score": f"{route_score:.3f}",
         },
     )
@@ -516,18 +552,28 @@ async def _stream_with_logging(
     try:
         async for chunk in stream:
             yield chunk
-            # Collect usage from the last SSE data chunk (OpenAI puts usage there)
+            # Collect usage from the last SSE data chunk
             if isinstance(chunk, bytes):
                 try:
                     text = chunk.decode("utf-8", errors="replace")
-                    if text.startswith("data: ") and '"usage":' in text:
-                        import json
-                        payload = json.loads(text[6:].strip())
+                    # OpenAI SSE: data: {..., "usage": {"prompt_tokens": N, ...}}
+                    # Anthropic SSE: event: message_delta \n data: {..., "usage": {"input_tokens": N, "output_tokens": N}}
+                    if '"usage":' in text:
+                        # Strip SSE prefix if present (handles both "data: " and Anthropic "event: ...\ndata: " patterns)
+                        if text.startswith("data: "):
+                            json_str = text[6:].strip()
+                        elif "data: " in text:
+                            # Anthropic: "event: message_delta\ndata: {...}"
+                            _, _, json_str = text.partition("data: ")
+                            json_str = json_str.strip()
+                        else:
+                            continue
+                        payload = json.loads(json_str)
                         u = payload.get("usage", {})
                         if u:
                             final_usage = {
-                                "prompt_tokens": u.get("prompt_tokens", 0),
-                                "completion_tokens": u.get("completion_tokens", 0),
+                                "prompt_tokens": u.get("prompt_tokens") or u.get("input_tokens", 0),
+                                "completion_tokens": u.get("completion_tokens") or u.get("output_tokens", 0),
                             }
                 except Exception:
                     pass
@@ -579,8 +625,8 @@ def _stream_response_from_gen(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "X-PolicyFlow-Policy": policy_name,
-            "X-PolicyFlow-Method": method,
+            "X-PolicyFlow-Policy": _safe_header(policy_name),
+            "X-PolicyFlow-Method": _safe_header(method),
             "X-PolicyFlow-Score": f"{score:.3f}",
         },
     )
@@ -602,8 +648,8 @@ def _stream_response(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "X-PolicyFlow-Policy": policy_name,
-            "X-PolicyFlow-Method": method,
+            "X-PolicyFlow-Policy": _safe_header(policy_name),
+            "X-PolicyFlow-Method": _safe_header(method),
             "X-PolicyFlow-Score": f"{score:.3f}",
         },
     )

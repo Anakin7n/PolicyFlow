@@ -157,20 +157,6 @@ class CascadeValidator:
             logger.warning("LLM judge call failed: %s — treating as pass", exc)
             return ValidationResult(True, "judge_error")
 
-    def should_cascade(
-        self, policy_cascade_enabled: bool, attempts: int
-    ) -> bool:
-        """Should we try escalating after a failure?"""
-        if not self.config.enabled:
-            return False
-        if not policy_cascade_enabled:
-            return False
-        if attempts >= self.config.max_retries:
-            return False
-        if attempts >= len(self.config.escalation_chain):
-            return False
-        return True
-
     def get_next_model(
         self,
         current_model: str,

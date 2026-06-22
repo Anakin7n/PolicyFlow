@@ -6,7 +6,13 @@
 routing_mode: hybrid
 
 # ── Providers: model → base_url + api_key mapping ─────────────────────
-# Each provider maps to a vendor's OpenAI-compatible API endpoint.
+# Each provider maps to a vendor's API endpoint.  The ``protocol`` field
+# tells PolicyFlow what format to send: "openai" (default, /v1/chat/completions)
+# or "anthropic" (/v1/messages).  Only set ``protocol: anthropic`` when
+# connecting directly to api.anthropic.com.  Aggregators (OpenRouter,
+# OneAPI, Codex Plus) always use ``protocol: openai`` regardless of the
+# model — they do their own internal protocol conversion.
+#
 # When a policy routes to a model, PolicyFlow looks up which provider
 # owns that model and forwards the request there directly.
 # Models not listed in any provider fall back to the default upstream.
@@ -101,6 +107,7 @@ providers:
   anthropic:
     base_url: https://api.anthropic.com
     api_key: "${ANTHROPIC_API_KEY}"
+    protocol: anthropic         # 直连 Anthropic 官方 API 才需要此行；中转站/聚合器不用
     models:
       - "claude-haiku-4-5"
       - "claude-sonnet-4-6"
@@ -217,7 +224,6 @@ policies_hybrid:
       ]
       max_input_tokens: 800
     route_to: "deepseek-v4-flash"
-    cascade: true
 
   - name: "复杂推理与分析"
     match:
@@ -374,7 +380,6 @@ policies_capability:
       - "格式化文本、整理排版、转 Markdown/HTML"
       - "校对纠错、修改语法、polish 文字"
       - "中英互译、跨语言转换"
-    cascade: true
     max_cost_tier: cheap
 
   - name: "复杂推理与分析"
@@ -533,7 +538,6 @@ policies_explicit:
       ]
       max_input_tokens: 800
     route_to: "deepseek-v4-flash"
-    cascade: true
 
   - name: "复杂推理与分析"
     match:
@@ -597,16 +601,13 @@ policies_explicit:
     route_to: "deepseek-v4-flash"
 
 # ══════════════════════════════════════════════════════════════════════
-# 级联验证 — 回答后验证质量，不通过则自动升级到更强的模型。
-# 只有策略里开了 cascade: true 的才会触发。
+# 级联验证 — 非流式请求回答后自动做规则检查（拒答/截断/空响应），
+# 不通过则沿能力评分升级到更强模型。流式请求跳过。
 # ══════════════════════════════════════════════════════════════════════
 cascade:
   enabled: true
-  verifier: rule_then_llm          # rule_only=纯规则 / llm_judge=AI裁判 / rule_then_llm=先规则再AI
-  judge_model: "deepseek-v4-flash" # AI 裁判模型（空=不用）。⚠ 必须已在 providers 中配了真实 Key，否则自动降级为 upstream.fallback_model
-  judge_prompt_template: ""        # 自定义裁判提示词（空=用默认）
   max_retries: 2                   # 最多升级几次
-  escalation_chain:                # 静态升级链（兜底）。正常走能力评分逐档升，只在极少数策略名无法映射任务类型时备用
+  escalation_chain:                # 静态升级链（兜底）
     - "deepseek-v4-flash"
     - "deepseek-v4-pro"
 
