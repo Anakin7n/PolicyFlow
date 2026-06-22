@@ -50,22 +50,21 @@ class SessionMemory:
     def __init__(self, ttl: int = 1800, max_size: int = 10_000) -> None:
         self.ttl = ttl
         self.max_size = max_size
-        self._store: dict[str, tuple[str, float]] = {}  # key → (model, expiry)
+        self._store: dict[str, tuple[str, str, float]] = {}  # key → (model, policy_name, expiry)
 
-    def get(self, key: str) -> str | None:
+    def get(self, key: str) -> tuple[str | None, str | None]:
         entry = self._store.get(key)
-        if entry and time.time() <= entry[1]:
-            return entry[0]
+        if entry and time.time() <= entry[2]:
+            return entry[0], entry[1]
         if entry:
             del self._store[key]
-        return None
+        return None, None
 
-    def set(self, key: str, model: str) -> None:
+    def set(self, key: str, model: str, policy_name: str = "") -> None:
         if len(self._store) >= self.max_size:
-            # Evict the oldest entry (smallest expiry timestamp).
-            oldest = min(self._store, key=lambda k: self._store[k][1])
+            oldest = min(self._store, key=lambda k: self._store[k][2])
             del self._store[oldest]
-        self._store[key] = (model, time.time() + self.ttl)
+        self._store[key] = (model, policy_name, time.time() + self.ttl)
 
 
 def _extract_prompt(request: ChatCompletionRequest) -> tuple[str, bool]:
@@ -217,9 +216,9 @@ class Router:
         # Internal agent follow-up (tool loop): no new human input — lock to
         # the session's previous model.  Skip embedding, no API call.
         if not is_new_turn and session_key:
-            prev = self.sessions.get(session_key)
-            if prev:
-                return decide(None, "session_continuation", 0.0).with_model(prev)
+            prev_model, prev_policy = self.sessions.get(session_key)
+            if prev_model:
+                return decide(None, "session_continuation", 0.0).with_model(prev_model).with_inherited_policy(prev_policy)
 
         def finalize(decision: RouteDecision) -> RouteDecision:
             """Record this turn's model for the session, then return the decision.
@@ -227,7 +226,8 @@ class Router:
             Lets a later continuation turn ("继续") reuse this model in Phase 4.
             """
             if session_key:
-                self.sessions.set(session_key, decision.target_model)
+                pn = decision.policy.name if decision.policy else ""
+                self.sessions.set(session_key, decision.target_model, pn)
             return decision
 
         # Phase 1: Image detection (explicit rule)
@@ -292,9 +292,9 @@ class Router:
         # routable signal — reuse the session's previous model if we have one;
         # otherwise fall back to the single fallback model.
         if session_key:
-            prev = self.sessions.get(session_key)
-            if prev:
-                return decide(None, "session_continuation", embed_score).with_model(prev)
+            prev_model, prev_policy = self.sessions.get(session_key)
+            if prev_model:
+                return decide(None, "session_continuation", embed_score).with_model(prev_model).with_inherited_policy(prev_policy)
 
         return decide(None, "fallback", 0.0).with_model(self.fallback_model)
 
@@ -302,7 +302,7 @@ class Router:
 class RouteDecision:
     """Result of a routing decision."""
 
-    __slots__ = ("policy", "method", "score", "target_model")
+    __slots__ = ("policy", "method", "score", "target_model", "inherited_policy_name")
 
     def __init__(
         self,
@@ -317,6 +317,7 @@ class RouteDecision:
         self.policy = policy
         self.method = method
         self.score = score
+        self.inherited_policy_name = ""
         if policy and use_capability and available_models:
             from .model_profiles import select_best_models
             task = policy.name
@@ -342,6 +343,11 @@ class RouteDecision:
     def with_model(self, model: str) -> "RouteDecision":
         """Override the resolved target model (Phase 4 continuation/fallback)."""
         self.target_model = model
+        return self
+
+    def with_inherited_policy(self, policy_name: str) -> "RouteDecision":
+        """Carry the previous turn's policy for session_continuation."""
+        self.inherited_policy_name = policy_name
         return self
 
     def __repr__(self) -> str:

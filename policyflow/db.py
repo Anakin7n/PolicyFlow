@@ -344,3 +344,27 @@ def query_export(days: int = 30) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def query_match_quality(days: int = 30) -> dict:
+    """Count requests by match quality: direct / continuation / fallback."""
+    conn = get_db()
+    quality = conn.execute(
+        """SELECT
+             CASE
+               WHEN method IN ('session_continuation') THEN 'Indirect'
+               WHEN method IN ('fallback', 'passthrough') THEN 'Failed'
+               ELSE 'Direct'
+             END as match_type,
+             COUNT(*) as cnt
+           FROM requests
+           WHERE timestamp >= date('now', ? || ' days')
+           GROUP BY match_type""",
+        (f"-{days}",),
+    ).fetchall()
+    conn.close()
+    total = sum(r["cnt"] for r in quality)
+    result = {"Direct": 0, "Indirect": 0, "Failed": 0, "total": total or 1}
+    for r in quality:
+        result[r["match_type"]] = r["cnt"]
+    return result

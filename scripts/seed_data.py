@@ -33,7 +33,7 @@ JUDGE_REASONS = [
 WEIGHTS = {
     "翻译、摘要、格式化": 22, "日常闲聊与简单问答": 20, "知识问答与学习": 15,
     "代码生成": 10, "代码审查与调试": 8, "文本创作与写作": 8,
-    "数据分析与处理": 5, "图片理解": 4, "默认": 3,
+    "数据分析与处理": 5, "图片理解": 4,
     "复杂推理与分析": 3, "系统架构与设计": 2, "性能分析与调优": 2,
     "安全审计与分析": 1,
 }
@@ -122,11 +122,6 @@ PROMPTS = {
         "这段代码的性能瓶颈在哪", "数据库查询怎么调优",
         "帮我看看为什么 QPS 上不去", "如何减少这个页面的加载时间",
     ],
-    "默认": [
-        "帮我整理一下今天的待办事项", "解释一下这个概念", "随便给点建议",
-        "这件事应该怎么处理比较好", "帮我想想有什么办法",
-        "总结一下刚才聊的内容", "给我一些参考意见",
-    ],
 }
 
 # Fallback prompts for any policy not in PROMPTS.
@@ -205,7 +200,23 @@ def _token_ranges(policy_name: str):
     return (100, 3000), (100, 4000)
 
 
-def seed(conn: sqlite3.Connection, n: int = 5000) -> None:
+def _make_ts(now):
+    """Generate a plausible timestamp within the last 30 days (skewed recent)."""
+    days_ago = int(abs(random.gauss(0, 9))) % 30
+    return now - timedelta(days=days_ago, hours=random.randint(0, 23),
+                           minutes=random.randint(0, 59))
+
+
+def _make_tokens(policy_name):
+    """Return (prompt_tokens, completion_tokens) with realistic non-round values."""
+    pr, cr = _token_ranges(policy_name)
+    # Uniform distribution inside the range → avoids integer-multiple artifacts
+    pt = random.randint(*pr) + random.randint(-73, 73)
+    ct = random.randint(*cr) + random.randint(-41, 41)
+    return max(pt, 4), max(ct, 1)
+
+
+def seed(conn: sqlite3.Connection, n: int = 5243) -> None:
     from policyflow import cost as cost_mod
 
     cfg, eng = load_config()
@@ -220,64 +231,94 @@ def seed(conn: sqlite3.Connection, n: int = 5000) -> None:
     for p in pols:
         task = p.name
         top = _top_models(task, avail, p.max_cost_tier or "", thresholds)
-        # Fallback: if scoring yields nothing (task not in weights / no model
-        # in tier), use route_to or the baseline so the row still has a model.
         fallback = p.route_to or baseline_model
         plan.append((p, task, top, fallback))
 
     now = datetime.now()
     rows = []
 
-    for _ in range(n):
-        idx = random.choices(range(len(pols)), weights=weights)[0]
-        p, task, top, fallback = plan[idx]
+    # ── method distribution: ~85% Direct / ~12% Indirect / ~3% Failed ──
+    DIRECT_METHODS  = ["keyword_match", "keyword_verified", "embedding_match"]
+    DIRECT_WEIGHTS  = [55, 28, 17]  # keyword is most common
+    INDIRECT_WEIGHT = 0.12
+    FAILED_WEIGHT   = 0.03
 
-        model = _weighted_pick(top) if top else fallback
-        cascade_on = bool(p.cascade)
+    # Keep a small pool of session-carrying policies so Indirect requests
+    # inherit a plausible policy_name (they "continue" a previous task).
+    session_policy_stack: list[str] = []
 
-        # method string — capability records 'capability(<task>)'
-        if cfg.routing_mode == "capability" and top:
-            method = f"capability({task})"
-        elif p.has_image:
-            method = "image_match"
-        elif p.default:
-            method = "default"
+    for i in range(n):
+        roll = random.random()
+        if roll < FAILED_WEIGHT:
+            # Failed — no policy matched, fallback model
+            p = None
+            method = "fallback"
+            score = round(random.uniform(0.18, 0.44), 3)
+            model = baseline_model
+            policy_name = "Failed"
+            prompt = random.choice(_FALLBACK_PROMPTS)
+            pr_tok, co_tok = random.randint(10, 200) + random.randint(-5, 5), random.randint(10, 300) + random.randint(-3, 3)
+
+        elif roll < FAILED_WEIGHT + INDIRECT_WEIGHT:
+            # Indirect (session_continuation) — continues a previous task
+            method = "session_continuation"
+            score = round(random.uniform(0.30, 0.52), 3)
+            if session_policy_stack and random.random() < 0.8:
+                policy_name = random.choice(session_policy_stack)
+                p = next((pp for pp, _, _, _ in plan if pp.name == policy_name), None)
+                if p is None:
+                    p = random.choice(pols)
+                    policy_name = p.name
+            else:
+                p = random.choice(pols)
+                policy_name = p.name
+            pr_tok, co_tok = _make_tokens(policy_name)
+            idx = pols.index(p) if p else 0
+            _, task, top, fallback = plan[idx]
+            model = _weighted_pick(top) if top else fallback
+
         else:
-            method = random.choices(
-                ["keyword_match", "keyword_verified", "embedding_match"],
-                weights=[60, 30, 10],
-            )[0]
+            # Direct hit — normal routing
+            idx = random.choices(range(len(pols)), weights=weights)[0]
+            p, task, top, fallback = plan[idx]
+            policy_name = p.name
+            if cfg.routing_mode == "capability" and top:
+                method = f"capability({task})"
+            elif p.has_image:
+                method = "image_match"
+            else:
+                method = random.choices(DIRECT_METHODS, weights=DIRECT_WEIGHTS)[0]
 
-        days_ago = int(abs(random.gauss(0, 10))) % 30
-        ts = now - timedelta(days=days_ago, hours=random.randint(0, 23),
-                             minutes=random.randint(0, 59))
+            model = _weighted_pick(top) if top else fallback
+            pr_tok, co_tok = _make_tokens(p.name)
+            score = 1.0 if method == "image_match" else round(random.uniform(0.58, 0.94), 3)
 
-        pr, cr = _token_ranges(p.name)
-        pt = random.randint(*pr)
-        ct = random.randint(*cr)
-        cost = cost_mod.calc_cost(model, pt, ct)
-        baseline = cost_mod.calc_compared_cost(pt, ct, baseline_model)
+            # Push to session stack so Indirect requests can inherit it
+            session_policy_stack.append(policy_name)
+            if len(session_policy_stack) > 30:
+                session_policy_stack.pop(0)
 
-        cascade_rate = 0.08 if cascade_on else 0.02
         cascade = 0
-        if random.random() < cascade_rate:
+        if random.random() < 0.02:
             cascade = 1 + random.randint(0, 2)
 
-        success = 0 if random.random() < 0.005 else 1
+        success = 0 if random.random() < 0.007 else 1
         jr = random.choice(JUDGE_REASONS) if cascade > 0 and random.random() < 0.3 else ""
 
-        score = 1.0 if method in ("image_match", "keyword_match") else round(random.uniform(0.70, 0.98), 3)
-        prompt = random.choice(PROMPTS.get(p.name, _FALLBACK_PROMPTS))
+        ts = _make_ts(now)
+        prompt = random.choice(PROMPTS.get(policy_name, _FALLBACK_PROMPTS))
+        cost = cost_mod.calc_cost(model, pr_tok, co_tok)
+        baseline = cost_mod.calc_compared_cost(pr_tok, co_tok, baseline_model)
 
         rows.append((
             ts.strftime("%Y-%m-%d %H:%M:%S"),
             random.choice(USERS),
             random.choice(["gpt-4o", "deepseek-v4-flash"]),
             model,
-            p.name,
+            policy_name,
             method,
             score,
-            pt, ct, pt + ct,
+            max(pr_tok, 1), max(co_tok, 1), max(pr_tok + co_tok, 2),
             round(cost, 6), round(baseline, 6),
             cascade, random.randint(150, 8000), success,
             hash_prompt(prompt), prompt[:500], jr,
@@ -297,9 +338,13 @@ def seed(conn: sqlite3.Connection, n: int = 5000) -> None:
 
     from policyflow import db
     s = db.query_summary(30)
+    mq = db.query_match_quality(30)
     models_used = len({r[3] for r in rows})
     print(f"Inserted {n} requests across {len(pols)} policies, {models_used} distinct models")
     print(f"Mode: {cfg.routing_mode} | available models: {len(avail)}")
+    print(f"Match: Direct={mq['Direct']} ({mq['Direct']/mq['total']*100:.0f}%)  "
+          f"Indirect={mq['Indirect']} ({mq['Indirect']/mq['total']*100:.0f}%)  "
+          f"Failed={mq['Failed']} ({mq['Failed']/mq['total']*100:.0f}%)")
     print(f"Actual: CNY {s['total_cost']:.2f}  Baseline: CNY {s['compared_cost']:.2f}  "
           f"Saved: CNY {s['saved_amount']:.2f} ({s['saved_pct']}%)")
 
@@ -311,5 +356,5 @@ if __name__ == "__main__":
     conn.row_factory = sqlite3.Row
     db.init_db()
     conn.execute("DELETE FROM requests"); conn.commit()
-    seed(conn, n=5000)
+    seed(conn)
     conn.close()

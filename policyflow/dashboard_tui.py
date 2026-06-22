@@ -112,7 +112,7 @@ def _shorten(model: str, n: int) -> str:
 
 # ── Content builders ──────────────────────────────────────────────────
 
-def _stats_table(summary: dict, cascade: dict) -> RichTable:
+def _stats_table(summary: dict, match_q: dict) -> RichTable:
     saved = summary["saved_amount"]
     sign, clr = ("+", "green") if saved >= 0 else ("", "red")
     t = RichTable.grid(padding=(0, 1))
@@ -122,9 +122,10 @@ def _stats_table(summary: dict, cascade: dict) -> RichTable:
     t.add_row("Cost",      f"¥{summary['total_cost']:,.2f}")
     t.add_row("Saved",     f"[{clr}]{sign}¥{abs(saved):,.2f}[/]")
     t.add_row("",          f"[{clr}]({summary['saved_pct']}%)[/]")
-    t.add_row("Cascade",   f"{cascade['cascade_pct']}%")
-    t.add_row("Direct",    f"{cascade['direct_pct']}%")
-    t.add_row("Failed",    f"{cascade['failed']}")
+    for label in ("Direct", "Indirect", "Failed"):
+        n = match_q[label]
+        pct = n / match_q["total"] * 100
+        t.add_row(label, f"{pct:.0f}% ({n})")
     t.add_row("",          "")
     t.add_row("[dim]Updated[/]", f"[dim]{datetime.now():%m-%d %H:%M}[/]")
     return t
@@ -509,7 +510,7 @@ class PolicyFlowDashboard(App):
         days = self.days
         summary  = db_module.query_summary(days)
         policies = db_module.query_policy_breakdown(days)
-        cascade  = db_module.query_cascade_stats(days)
+        match_q  = db_module.query_match_quality(days)
         daily    = db_module.query_daily_costs(days)
         recent   = db_module.query_recent_requests(50)
         capability = db_module.query_capability_breakdown(days)
@@ -531,7 +532,7 @@ class PolicyFlowDashboard(App):
         bar_w   = max(6, right_w - 24)
         label_w = max(8, min(18, w // 6))
 
-        self.query_one("#stats-body",  Static).update(_stats_table(summary, cascade))
+        self.query_one("#stats-body",  Static).update(_stats_table(summary, match_q))
         self.query_one("#policy-body", Static).update(_policy_table(policies, bar_w))
         self.query_one("#model-body",  Static).update(_model_table(model_rows, bar_w, label_w))
         self.query_one("#capability-body", Static).update(_capability_table(capability, bar_w, label_w))

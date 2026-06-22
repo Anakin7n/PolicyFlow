@@ -118,7 +118,7 @@ async def anthropic_messages(
     openai_req.model = decision.target_model
     route_method = decision.method
     route_score = decision.score
-    route_policy_name = decision.policy.name if decision.policy else "none"
+    route_policy_name = decision.policy.name if decision.policy else (decision.inherited_policy_name or "Failed")
 
     logger.info(
         "Route [anthropic]: %s → %s  [%s, %.3f]",
@@ -288,7 +288,7 @@ async def chat_completions(
     request.model = decision.target_model
     route_method = decision.method
     route_score = decision.score
-    route_policy_name = decision.policy.name if decision.policy else "none"
+    route_policy_name = decision.policy.name if decision.policy else (decision.inherited_policy_name or "Failed")
 
     logger.info(
         "Route: %s → %s  [%s, %.3f]",
