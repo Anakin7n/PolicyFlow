@@ -16,6 +16,7 @@ All benchmark data sourced from official reports & public leaderboards (2026-06)
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import ClassVar
 
@@ -315,7 +316,7 @@ PROFILES: dict[str, ModelProfile] = {
         code=0.76, math=0.74, reasoning=0.78, writing=0.75,
         multilingual=0.86, vision=0.68, instruction_following=0.76,
         agent_capable=0.60, context_window=1_048_576,
-        cost_per_1m_input=1.4, cost_per_1m_output=34.4,
+        cost_per_1m_input=1.4, cost_per_1m_output=4.40,
     ),
 
     # ── Kimi ───────────────────────────────────────────────────
@@ -425,8 +426,6 @@ def score_model(
 
     return capability * (1.0 - budget_weight) + cost_norm * budget_weight
 
-
-import math
 
 
 # Cost-tier boundaries (USD per 1M tokens, applied to weighted average_cost).

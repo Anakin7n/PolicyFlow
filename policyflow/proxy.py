@@ -47,6 +47,7 @@ class UpstreamProxy:
     def __init__(self, config: Config) -> None:
         self.config = config
         self._clients: dict[str, httpx.AsyncClient] = {}
+        self._sse_buffer: dict[str, str] = {}  # partial SSE event across TCP chunks
 
     def _get_client(self, provider_name: str | None = None) -> httpx.AsyncClient:
         """Get or lazily create an httpx client for the given provider.
@@ -130,63 +131,59 @@ class UpstreamProxy:
         payload.update(request.extra or {})
         return payload
 
-    @staticmethod
-    def _parse_anthropic_stream_chunk(chunk: bytes) -> list[bytes]:
+    def _parse_anthropic_stream_chunk(self, chunk: bytes) -> list[bytes]:
         """Parse one Anthropic SSE chunk and convert to OpenAI SSE bytes.
 
-        Anthropic streaming yields SSE events like:
-            event: content_block_delta
-            data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}
-
-        We convert these to OpenAI SSE chunks:
-            data: {"choices":[{"delta":{"content":"Hi"}}]}
+        Uses ``self._sse_buffer`` to carry a partial event across TCP chunks
+        — an ``event:`` and ``data:`` line landing in different chunks won't
+        be silently dropped.
         """
         text = chunk.decode("utf-8", errors="replace")
         lines = text.split("\n")
         result: list[bytes] = []
-        current_event: dict[str, str] = {}
+        buf = self._sse_buffer
 
         for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("event:"):
-                current_event["event"] = line[6:].strip()
-            elif line.startswith("data:"):
-                current_event["data"] = line[5:].strip()
+            stripped = line.strip()
+            if not stripped:
+                # Blank line — flush the current event if complete.
+                if "event" in buf and "data" in buf:
+                    evt = buf.pop("event")
+                    data_str = buf.pop("data")
+                    buf.clear()
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
 
-            # When we have a complete event pair, convert it
-            if "event" in current_event and "data" in current_event:
-                evt = current_event.pop("event")
-                data_str = current_event.pop("data")
-                try:
-                    data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-
-                if evt == "content_block_delta":
-                    delta = data.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        text_content = delta.get("text", "")
+                    if evt == "content_block_delta":
+                        delta = data.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text_content = delta.get("text", "")
+                            oai_chunk = json.dumps({
+                                "choices": [{"index": 0, "delta": {"content": text_content}}],
+                            }, ensure_ascii=False)
+                            result.append(f"data: {oai_chunk}\n\n".encode("utf-8"))
+                    elif evt == "message_delta":
+                        usage = data.get("usage", {})
+                        finish = data.get("delta", {}).get("stop_reason", "end_turn")
+                        oai_finish = {"end_turn": "stop", "max_tokens": "length", "tool_use": "tool_calls"}.get(finish, "stop")
                         oai_chunk = json.dumps({
-                            "choices": [{"index": 0, "delta": {"content": text_content}}],
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": oai_finish}],
+                            "usage": {
+                                "prompt_tokens": usage.get("input_tokens", 0),
+                                "completion_tokens": usage.get("output_tokens", 0),
+                                "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+                            },
                         }, ensure_ascii=False)
                         result.append(f"data: {oai_chunk}\n\n".encode("utf-8"))
-                elif evt == "message_delta":
-                    usage = data.get("usage", {})
-                    finish = data.get("delta", {}).get("stop_reason", "end_turn")
-                    oai_finish = {"end_turn": "stop", "max_tokens": "length", "tool_use": "tool_calls"}.get(finish, "stop")
-                    oai_chunk = json.dumps({
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": oai_finish}],
-                        "usage": {
-                            "prompt_tokens": usage.get("input_tokens", 0),
-                            "completion_tokens": usage.get("output_tokens", 0),
-                            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
-                        },
-                    }, ensure_ascii=False)
-                    result.append(f"data: {oai_chunk}\n\n".encode("utf-8"))
-                elif evt == "message_stop":
-                    result.append(b"data: [DONE]\n\n")
+                    elif evt == "message_stop":
+                        result.append(b"data: [DONE]\n\n")
+                continue
+            if stripped.startswith("event:"):
+                buf["event"] = stripped[6:].strip()
+            elif stripped.startswith("data:"):
+                buf["data"] = stripped[5:].strip()
 
         return result
 
@@ -292,14 +289,6 @@ class UpstreamProxy:
                     last_error = e
                     continue
                 raise
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Provider %r unreachable for model %r, trying next: %s",
-                    provider, model, e,
-                )
-                last_error = e
-                continue
 
         # All providers exhausted (or none declared). Fall back to upstream.
         fallback = self.config.upstream_fallback_model
@@ -349,6 +338,37 @@ class UpstreamProxy:
         except httpx.StreamError as e:
             raise ProxyError(f"Stream error from upstream {label}: {e}", status_code=0)
 
+    async def chat_completion_stream_with_fallback(
+        self, request: ChatCompletionRequest,
+    ) -> AsyncIterator[bytes]:
+        """Streaming variant of ``chat_completion_with_fallback``.
+
+        Tries every provider that declares this model; falls back to the
+        upstream fallback_model when all providers are exhausted.
+        """
+        model = request.model
+        candidates = self.config.get_model_providers(model) or [None]
+        last_error: Exception | None = None
+
+        for provider in candidates:
+            try:
+                async for chunk in self.chat_completion_stream(request, provider_name=provider):
+                    yield chunk
+                return
+            except ProxyError as e:
+                if e.retryable:
+                    last_error = e
+                    continue
+                raise
+
+        fallback = self.config.upstream_fallback_model
+        logger = logging.getLogger(__name__)
+        logger.warning("All streaming providers failed for %r, last: %s", model, last_error)
+        if fallback:
+            request.model = fallback
+            async for chunk in self.chat_completion_stream(request):
+                yield chunk
+
     async def anthropic_messages_stream(
         self, anthropic_body: dict, provider_name: str,
     ) -> AsyncIterator[bytes]:
@@ -376,6 +396,27 @@ class UpstreamProxy:
         except httpx.StreamError as e:
             raise ProxyError(f"Stream error from upstream {label}: {e}", status_code=0)
 
+    async def anthropic_messages_stream_with_fallback(
+        self, anthropic_body: dict, model: str,
+    ) -> AsyncIterator[bytes]:
+        """Streaming Anthropic Messages with provider fallback."""
+        candidates = self.config.get_model_providers(model) or [None]
+        last_error: Exception | None = None
+        for provider in candidates:
+            try:
+                async for chunk in self.anthropic_messages_stream(anthropic_body, provider):
+                    yield chunk
+                return
+            except ProxyError as e:
+                if e.retryable:
+                    last_error = e
+                    continue
+                raise
+        raise ProxyError(
+            f"All Anthropic providers failed for {model} (last: {last_error})",
+            status_code=502,
+        )
+
     async def anthropic_messages(
         self, anthropic_body: dict, provider_name: str,
     ) -> dict:
@@ -397,6 +438,25 @@ class UpstreamProxy:
                 status_code=response.status_code,
             )
         return response.json()
+
+    async def anthropic_messages_with_fallback(
+        self, anthropic_body: dict, model: str,
+    ) -> dict:
+        """Anthropic Messages with provider fallback."""
+        candidates = self.config.get_model_providers(model) or [None]
+        last_error: Exception | None = None
+        for provider in candidates:
+            try:
+                return await self.anthropic_messages(anthropic_body, provider)
+            except ProxyError as e:
+                if e.retryable:
+                    last_error = e
+                    continue
+                raise
+        raise ProxyError(
+            f"All Anthropic providers failed for {model} (last: {last_error})",
+            status_code=502,
+        )
 
     async def list_models(self) -> dict:
         """Proxy the /v1/models endpoint (uses default upstream)."""

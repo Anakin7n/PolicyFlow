@@ -1,6 +1,6 @@
 """PolicyFlow — FastAPI application entry point.
 
-Week 6: multi-provider routing + LLM-as-Judge cascade + CLI + AI optimizer.
+Week 6: multi-provider routing + rule-based cascade + CLI + AI optimizer.
 """
 
 from __future__ import annotations
@@ -45,27 +45,6 @@ async def lifespan(app: FastAPI):
     router = Router(config)
     cascade_config = CascadeConfig(**config.cascade_data)
     cascade = CascadeValidator(cascade_config)
-
-    # Build LLM-as-Judge function if configured
-    judge_fn = None
-    if cascade_config.verifier in ("llm_judge", "rule_then_llm") and cascade_config.judge_model:
-        async def _judge(prompt: str, response_text: str) -> tuple[bool, str]:
-            judge_req = ChatCompletionRequest(
-                model=cascade_config.judge_model,
-                messages=[Message(role="user", content=cascade_config.judge_prompt.format(
-                    prompt=prompt[:4000], response=response_text[:4000]
-                ))],
-            )
-            try:
-                jr, _ = await proxy.chat_completion_with_fallback(judge_req)
-                text = (jr.choices[0].message.content or "").strip()
-                passed = text.upper().startswith("PASS")
-                reason = "" if passed else text[5:].strip()[:200] if text.startswith("FAIL") else text[:200]
-                return passed, reason
-            except Exception:
-                return True, "judge_error"
-        judge_fn = _judge
-        cascade = CascadeValidator(cascade_config, judge_fn=judge_fn)
 
     await router.initialize()
 
@@ -155,15 +134,20 @@ async def anthropic_messages(
     if stream:
         try:
             if is_anthropic_target:
-                # Update model in the original Anthropic body and forward raw
                 raw_body = dict(anthropic_body)
                 raw_body["model"] = openai_req.model
-                raw_stream = proxy.anthropic_messages_stream(raw_body, provider_name)
+                try:
+                    raw_stream = proxy.anthropic_messages_stream_with_fallback(raw_body, openai_req.model)
+                except ProxyError:
+                    logger.warning(
+                        "All Anthropic providers failed for %r, falling back to OpenAI pipeline",
+                        openai_req.model,
+                    )
+                    converter = AnthropicStreamConverter(openai_req.model)
+                    raw_stream = _anthropic_stream_wrapper(proxy, openai_req, converter)
             else:
                 converter = AnthropicStreamConverter(openai_req.model)
-                raw_stream = _anthropic_stream_wrapper(
-                    proxy, openai_req, provider_name, converter,
-                )
+                raw_stream = _anthropic_stream_wrapper(proxy, openai_req, converter)
             log_params = {
                 "user": user, "original_model": original_model,
                 "routed_model": openai_req.model, "policy_name": route_policy_name,
@@ -179,31 +163,39 @@ async def anthropic_messages(
             raise
     else:
         try:
+            cascade_specialty = decision.policy.name if decision.policy else ""
+            available_models = config.available_models
+            use_anthropic_native = False
+
             if is_anthropic_target:
-                # Forward raw Anthropic body, skip cascade (Anthropic-native)
+                # Try Anthropic-native first; fall back to OpenAI pipeline on failure.
                 raw_body = dict(anthropic_body)
                 raw_body["model"] = openai_req.model
                 raw_body["stream"] = False
-                anthropic_resp = await proxy.anthropic_messages(raw_body, provider_name)
-                # Build a minimal OpenAI response for logging compatibility
-                content = anthropic_resp.get("content", [])
-                text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-                response = ChatCompletionResponse(
-                    model=openai_req.model,
-                    choices=[Choice(index=0, message=Message(role="assistant", content=text), finish_reason="stop")],
-                    usage=Usage(
-                        prompt_tokens=anthropic_resp.get("usage", {}).get("input_tokens", 0),
-                        completion_tokens=anthropic_resp.get("usage", {}).get("output_tokens", 0),
-                    ),
-                )
-                cascade_attempts = 1
-            else:
-                cascade_specialty = decision.policy.name if decision.policy else ""
-                available_models = config.available_models
+                try:
+                    anthropic_resp = await proxy.anthropic_messages_with_fallback(raw_body, openai_req.model)
+                    content = anthropic_resp.get("content", [])
+                    text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+                    response = ChatCompletionResponse(
+                        model=openai_req.model,
+                        choices=[Choice(index=0, message=Message(role="assistant", content=text), finish_reason="stop")],
+                        usage=Usage(
+                            prompt_tokens=anthropic_resp.get("usage", {}).get("input_tokens", 0),
+                            completion_tokens=anthropic_resp.get("usage", {}).get("output_tokens", 0),
+                        ),
+                    )
+                    cascade_attempts = 1
+                    use_anthropic_native = True
+                except ProxyError:
+                    logger.warning(
+                        "All Anthropic providers failed for %r, falling back to OpenAI pipeline",
+                        openai_req.model,
+                    )
+
+            if not use_anthropic_native:
                 response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
                     proxy, cascade, openai_req, decision, cascade_specialty, available_models,
                 )
-                # Convert OpenAI response → Anthropic format
                 anthropic_resp = openai_to_anthropic_response(
                     response.model_dump(exclude_none=True),
                     routed_model=openai_req.model,
@@ -247,11 +239,10 @@ async def anthropic_messages(
 async def _anthropic_stream_wrapper(
     proxy: UpstreamProxy,
     request: ChatCompletionRequest,
-    provider_name: str | None,
     converter: AnthropicStreamConverter,
 ) -> AsyncIterator[bytes]:
     """Bridge: OpenAI SSE stream → Anthropic SSE events."""
-    async for chunk in proxy.chat_completion_stream(request, provider_name=provider_name):
+    async for chunk in proxy.chat_completion_stream_with_fallback(request):
         if isinstance(chunk, str):
             for event in converter.feed(chunk):
                 yield event
@@ -307,10 +298,9 @@ async def chat_completions(
     # ── Step 2: Forward + cascade ──────────────────────────────────
     try:
         if request.stream:
-            if cascade.config.enabled and cascade.config.verifier != "rule_only":
+            if cascade.config.enabled:
                 logger.warning("Cascade validation is not supported for streaming requests")
-            provider_name = proxy.config.get_model_provider(request.model)
-            raw_stream = proxy.chat_completion_stream(request, provider_name=provider_name)
+            raw_stream = proxy.chat_completion_stream_with_fallback(request)
             log_params = {
                 "user": user, "original_model": original_model,
                 "routed_model": request.model, "policy_name": route_policy_name,
@@ -465,21 +455,14 @@ async def _forward_with_cascade(
     specialty: str = "",
     available_models: list[str] | None = None,
 ) -> tuple[ChatCompletionResponse, int, str]:
-    """Forward request and run quality-cascade validation.
-
-    Quality cascade only: validates the response and escalates on quality
-    failure.  Proxy errors are NOT handled here — model failover (capability
-    top-N retry) and provider fallback (upstream.fallback_model) are the
-    caller's / proxy layer's responsibility.
+    """Forward request and run rule-based cascade validation.
 
     Returns (response, cascade_attempts, judge_reason).
+    judge_reason is always "" (kept for call-site compatibility).
     """
     max_attempts = cascade.config.max_retries + 1
     cascade_attempts = 0
-    judge_reason = ""
-    verifier = cascade.config.verifier
 
-    # Quality cascade disabled → forward once, no validation
     if not cascade.config.enabled:
         response, _ = await proxy.chat_completion_with_fallback(request)
         return response, 0, ""
@@ -490,54 +473,22 @@ async def _forward_with_cascade(
         try:
             response, _ = await proxy.chat_completion_with_fallback(request)
         except ProxyError:
-            raise  # model failover belongs to the caller, not here
+            raise
 
-        # ── Rule-based validation (skip if verifier is llm_judge-only) ──
-        if verifier != "llm_judge":
-            validation = cascade.validate(response, request)
-            if not validation.passed:
-                logger.info(
-                    "Cascade fail [%s]: %s → escalating (attempt %d/%d)",
-                    validation.reason, current_model, attempt + 1, max_attempts,
-                )
-                next_model = cascade.get_next_model(current_model, specialty, available_models)
-                if not next_model or attempt >= max_attempts - 1:
-                    logger.warning("Cascade exhausted, returning last response from %s", current_model)
-                    return response, cascade_attempts, judge_reason
-                request.model = next_model
-                cascade_attempts += 1
-                continue
+        validation = cascade.validate(response, request)
+        if validation.passed:
+            return response, cascade_attempts, ""
 
-        # ── LLM-as-Judge (opt-in) ──
-        if verifier in ("llm_judge", "rule_then_llm") and cascade.has_judge:
-            # Extract prompt and response text for the judge
-            last_msg = request.messages[-1].content if request.messages else None
-            if last_msg is None:
-                prompt_for_judge = ""
-            elif isinstance(last_msg, str):
-                prompt_for_judge = last_msg
-            else:
-                prompt_for_judge = str(last_msg)
-            if not response.choices:
-                return response, cascade_attempts, "judge_no_choices"
-            resp_content = cascade._extract_content(response)
-            judge_result = await cascade.judge_async(prompt_for_judge, resp_content)
-            if not judge_result.passed:
-                judge_reason = judge_result.reason
-                logger.info(
-                    "Judge FAIL [%s]: %s → escalating (attempt %d/%d)",
-                    judge_reason, current_model, attempt + 1, max_attempts,
-                )
-                next_model = cascade.get_next_model(current_model, specialty, available_models)
-                if not next_model or attempt >= max_attempts - 1:
-                    logger.warning("Cascade exhausted, returning last response from %s", current_model)
-                    return response, cascade_attempts, judge_reason
-                request.model = next_model
-                cascade_attempts += 1
-                continue
-
-        # All checks passed
-        return response, cascade_attempts, judge_reason
+        logger.info(
+            "Cascade fail [%s]: %s → escalating (attempt %d/%d)",
+            validation.reason, current_model, attempt + 1, max_attempts,
+        )
+        next_model = cascade.get_next_model(current_model, specialty, available_models)
+        if not next_model or attempt >= max_attempts - 1:
+            logger.warning("Cascade exhausted, returning last response from %s", current_model)
+            return response, cascade_attempts, ""
+        request.model = next_model
+        cascade_attempts += 1
 
     raise HTTPException(status_code=502, detail="All cascade attempts failed")
 

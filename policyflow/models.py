@@ -17,6 +17,7 @@ class Message(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None  # DeepSeek thinking / multi-turn passthrough
 
 
 class ChatCompletionRequest(BaseModel):

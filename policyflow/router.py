@@ -47,8 +47,9 @@ class SessionMemory:
     to the fallback — the follow-up continues whatever task was underway.
     """
 
-    def __init__(self, ttl: int = 1800) -> None:
+    def __init__(self, ttl: int = 1800, max_size: int = 10_000) -> None:
         self.ttl = ttl
+        self.max_size = max_size
         self._store: dict[str, tuple[str, float]] = {}  # key → (model, expiry)
 
     def get(self, key: str) -> str | None:
@@ -60,32 +61,65 @@ class SessionMemory:
         return None
 
     def set(self, key: str, model: str) -> None:
+        if len(self._store) >= self.max_size:
+            # Evict the oldest entry (smallest expiry timestamp).
+            oldest = min(self._store, key=lambda k: self._store[k][1])
+            del self._store[oldest]
         self._store[key] = (model, time.time() + self.ttl)
 
 
-def _extract_prompt(request: ChatCompletionRequest) -> str:
-    """Extract the text of the *latest* user message for routing.
+def _extract_prompt(request: ChatCompletionRequest) -> tuple[str, bool]:
+    """Return (prompt, is_new_turn) for the current request.
 
-    Only the current turn is routed — not the whole history.  This is what lets
-    a continuation turn ("继续") fall through to Phase 4 (where the session's
-    previous model is reused) instead of being dragged into a policy by earlier
-    turns' keywords.  It also keeps a long coding session from pinning every
-    later turn to the topic of its opening messages.
+    *prompt* is the text of the last real human message (skipping XML-injected
+    ``role=user`` blocks from agent clients like Claude Code).
+
+    *is_new_turn* is True when the prompt came from the very last user message
+    — meaning the human just sent new input.  When all recent user messages are
+    injected blocks and the real prompt sits further back in history, this is
+    an internal agent follow-up (tool loop continuation) and *is_new_turn* is
+    False.
     """
+    last_user = None
+    for msg in request.messages:
+        if msg.role == "user":
+            last_user = msg
+
+    found_newest = None
     for msg in reversed(request.messages):
         if msg.role != "user":
             continue
         content = msg.content
+        text = ""
         if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
+            text = content.strip()
+        elif isinstance(content, list):
             parts = [
                 block.get("text", "")
                 for block in content
                 if isinstance(block, dict) and block.get("type") == "text"
             ]
-            return "\n".join(parts).strip()
-    return ""
+            text = "\n".join(parts).strip()
+
+        if not text:
+            continue
+        if not text.startswith("<"):
+            if found_newest is None:
+                found_newest = text
+                is_new_turn = (msg is last_user)
+            break
+
+    if found_newest is not None:
+        return found_newest, is_new_turn
+
+    # All user messages appear injected — fall back to the last one we saw.
+    if last_user is not None:
+        c = last_user.content
+        if isinstance(c, str):
+            return c.strip(), False
+        if isinstance(c, list):
+            return "\n".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text").strip(), False
+    return "", False
 
 
 def _estimate_tokens(text: str) -> int:
@@ -165,7 +199,8 @@ class Router:
         most capable model in it).
         """
         available = self.config.available_models
-        prompt = _extract_prompt(request)
+        prompt, is_new_turn = _extract_prompt(request)
+        session_key = _session_key(request)
         token_estimate = _estimate_tokens(prompt)
         has_img = _has_image(request.messages)
 
@@ -179,7 +214,12 @@ class Router:
                 original_model=request.model,
             )
 
-        session_key = _session_key(request)
+        # Internal agent follow-up (tool loop): no new human input — lock to
+        # the session's previous model.  Skip embedding, no API call.
+        if not is_new_turn and session_key:
+            prev = self.sessions.get(session_key)
+            if prev:
+                return decide(None, "session_continuation", 0.0).with_model(prev)
 
         def finalize(decision: RouteDecision) -> RouteDecision:
             """Record this turn's model for the session, then return the decision.

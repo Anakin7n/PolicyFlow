@@ -136,10 +136,13 @@ def _convert_assistant_blocks(blocks: list[dict[str, Any]]) -> PFMessage:
     """Convert Anthropic content blocks from an assistant message.
 
     Assistant content can mix text, tool_use, and thinking blocks.
-    Thinking blocks are dropped (no OpenAI equivalent).
+    Thinking blocks are preserved as ``reasoning_content`` for the
+    OpenAI-format request so that providers requiring multi-turn
+    reasoning passthrough (DeepSeek thinking mode, etc.) work correctly.
     """
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
+    reasoning_parts: list[str] = []
 
     for block in blocks:
         btype = block.get("type", "")
@@ -154,14 +157,18 @@ def _convert_assistant_blocks(blocks: list[dict[str, Any]]) -> PFMessage:
                     "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
                 },
             })
-        elif btype == "thinking":
-            pass  # No OpenAI equivalent
+        elif btype in ("thinking", "extended_thinking"):
+            thinking_text = block.get("thinking", "") or block.get("text", "")
+            if thinking_text:
+                reasoning_parts.append(thinking_text)
 
     msg = PFMessage(role="assistant")
     if text_parts:
         msg.content = "\n".join(text_parts)
     if tool_calls:
         msg.tool_calls = tool_calls
+    if reasoning_parts:
+        msg.reasoning_content = "\n".join(reasoning_parts)
     return msg
 
 
@@ -317,6 +324,16 @@ def openai_to_anthropic_response(
 
     # Convert content + tool_calls to Anthropic content blocks
     content_blocks: list[dict[str, Any]] = []
+
+    # Reasoning / thinking content — preserve for multi-turn passthrough
+    # (DeepSeek thinking mode, Gemini thought_signature, etc.)
+    reasoning = message.get("reasoning_content") or ""
+    if reasoning:
+        content_blocks.append({
+            "type": "thinking",
+            "thinking": reasoning,
+            "signature": "",
+        })
 
     # Text content
     text = message.get("content") or ""

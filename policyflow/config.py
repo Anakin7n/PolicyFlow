@@ -286,7 +286,11 @@ class Config:
 
     @property
     def cascade_data(self) -> dict:
-        return self.data.get("cascade", {})
+        data = self.data.get("cascade", {})
+        # Only pass fields that CascadeConfig accepts (backward-compat:
+        # ignore old verifier/judge_model keys if present).
+        known = {"enabled", "max_retries", "escalation_chain"}
+        return {k: v for k, v in data.items() if k in known}
 
     # ── Logging ───────────────────────────────────────────────────
 

@@ -36,7 +36,7 @@ a group of similar prompts that could become a new policy.
 {unmatched_clusters}
 
 ## Cascade Anomalies
-Failed cascade attempts with LLM judge reasons (when available).
+Failed cascade attempts with validation reasons (when available).
 {cascade_anomalies}
 
 ## Instructions

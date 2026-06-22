@@ -123,7 +123,7 @@ providers:
 | `policies_hybrid` | hybrid 模式下的策略集，可混用写死模型和算法选模 |
 | `policies_capability` | capability 模式下的策略集，全由算法选模 |
 | `policies_explicit` | explicit 模式下的策略集，全写死模型 |
-| `cascade` | 级联验证：验证方式、升级链条、最大重试次数。若启用 LLM 裁判，`judge_model` 必须已在 `providers` 中配了真实 Key |
+| `cascade` | 级联验证：规则检查 + 能力评分逐档升级。`max_retries` 控制最多升级次数 |
 | `cost_tiers` | `max_cost_tier` 的分档边界（可选，省略用默认 cheap<0.5、mid<1.7） |
 | `optimizer` | AI 优化引擎：是否启用、用哪个模型分析、最多几条建议。所用模型必须已在 `providers` 中配了真实 Key |
 | `logging` | `log_prompt_preview` 是否记录提问原文（默认 `true`，利于优化建议；隐私敏感设 `false`，详见"AI 优化引擎"节） |
@@ -374,7 +374,7 @@ python -m policyflow optimize --since 30d
   │     选定 model → 查 providers 映射 → 改写 model 字段 + 切对应 base_url
   │
   ├── ③ 级联验证（仅非流式请求）
-  │     模型作答 → 规则验证器 / LLM Judge 评估
+  │     模型作答 → 规则验证器评估
   │     不通过 → 沿能力评分升一档重试（最多 max_retries 次）
   │
   └── ④ 成本记录   SQLite 写一行：策略命中、最终模型、token、
@@ -442,7 +442,6 @@ routing_mode: hybrid
 | `max_input_tokens` | int | 输入 token **不超过**这个数才命中。配 `keywords` 用来防止长文被错归 |
 | `min_input_tokens` | int | 输入 token **不小于**这个数才命中。用来过滤掉太短的请求 |
 | `has_image` | bool | 请求含图片才命中（多模态请求） |
-| `default` | bool | 兜底标记，前面都没命中走我（每个策略集必须有且只能有一条） |
 
 ### 关键词匹配 + Embedding 复核
 
@@ -513,7 +512,7 @@ upstream:
 - 数据来源：官方模型卡、Chatbot Arena、SuperCLUE 等公开榜单（2026-06）；无基准的模型取同系列已知模型的保守估算
 - **不需要改代码**——觉得某个模型的某项评分不准？直接编辑 [model_profiles.py](policyflow/model_profiles.py) 里对应数字，重启生效
 
-**评分公式**：综合分 = 能力分 × 80% + 价格分 × 20%。价格分是 log 归一化后的成本效率（便宜 → 高分）。
+**评分公式**：纯能力分排序，不打价格分。省钱交给上游的 `max_cost_tier` 过滤——候选池框定后,池内只比谁最能胜任任务。
 
 **不是取最高分，而是 Top-3 加权随机（90/7/3）**：评分前三的模型按 90% / 7% / 3% 的权重随机分流——#1 是绝对主力，同时给 #2、#3 少量流量做容灾预热和额度平滑，避免"唯一最佳模型"一挂全挂。
 
@@ -600,31 +599,21 @@ PolicyFlow 有三层独立的容灾/升级机制，各司其职：
 
 > route_to 的模型走 Provider 容灾 → upstream.fallback_model → 502
 
-两档验证器：
+规则验证（零成本，全局生效）：
 
-**第一档：规则验证（默认，零成本）**
 1. 拒绝检测：回答含 "I cannot"、"无法" 等
 2. 截断检测：回答未正常结尾
 3. 空答检测：回答过短 (< 10 字符)
 4. JSON 检测：要求 JSON 但输出不合法
 
-**第二档：LLM-as-Judge（可选）**
-
-用便宜模型当裁判，深度检查回答质量——完整性、正确性、格式、幻觉。YAML 配置：
-
 ```yaml
 cascade:
   enabled: true
-  verifier: rule_then_llm     # rule_only | llm_judge | rule_then_llm
-  judge_model: deepseek-v4-flash
   max_retries: 2              # 最多升级几次
-  escalation_chain:           # 静态升级链（兜底用，见下）
+  escalation_chain:           # 静态升级链（兜底）
     - "deepseek-v4-flash"
     - "deepseek-v4-pro"
-    - "deepseek-r1"
 ```
-
-> **`judge_model` 的 API Key 从哪来？** 从 `providers` 段自动查找（和路由请求走同一套 provider 容灾逻辑）。若 `judge_model` 不在任何 provider 里、或配了空 Key，会自动降级为 `upstream.fallback_model` 并用 `upstream` 的 Key 调用——裁判不会报错，但实际用的模型和你指定的是两个。因此 `judge_model` 必须在 providers 里配好真实 Key。`optimizer.model` 同理。
 
 ### 升级到哪个模型？——按能力评分逐档升
 
@@ -726,7 +715,7 @@ PolicyFlow/
 │   ├── policy.py         # 策略数据模型
 │   ├── classifier.py     # Embedding 分类器（含关键词复核）
 │   ├── router.py         # 路由决策引擎（含会话承接 + 统一兜底）
-│   ├── cascade.py        # 级联验证器 + LLM-as-Judge
+│   ├── cascade.py        # 规则验证器 + 能力评分升级
 │   ├── db.py             # SQLite 日志层
 │   ├── cost.py           # 39 个模型定价
 │   ├── model_profiles.py # 模型能力评分（8维）+ 智能选模

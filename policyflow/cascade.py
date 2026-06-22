@@ -1,7 +1,6 @@
-"""Cascade validator — validates cheap-model responses and escalates on failure.
+"""Cascade validator — rule checks + capability-graded escalation on failure.
 
 Inspired by NadirClaw's cascade design: "分类器不需要完美，先让便宜模型试试，不行再换贵的。"
-Includes LLM-as-Judge: use a cheap model to deeply evaluate response quality.
 """
 
 from __future__ import annotations
@@ -10,31 +9,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Awaitable
 
 from .models import ChatCompletionRequest, ChatCompletionResponse
 
 logger = logging.getLogger(__name__)
-
-# Default prompt template for LLM-as-Judge
-_JUDGE_PROMPT = """You are evaluating an AI assistant's response quality.
-
-User request:
-{prompt}
-
-AI response:
-{response}
-
-Judge these criteria:
-1. Completeness — Does the response fully address the user's request?
-2. Correctness — Are there any factual errors or contradictions?
-3. Format — If a specific format (JSON/markdown/code) was requested, is it correct?
-4. Hallucination — Does it claim false capabilities or cite non-existent sources?
-
-Reply with exactly ONE line:
-PASS
-or
-FAIL: <brief reason, max 100 chars>"""
 
 
 @dataclass
@@ -42,20 +20,8 @@ class CascadeConfig:
     """Cascade validation configuration."""
 
     enabled: bool = True
-    verifier: str = "rule_only"      # rule_only | llm_judge | rule_then_llm
-    judge_model: str = ""            # Model to use for LLM-as-Judge
-    judge_prompt_template: str = ""  # Custom judge prompt (empty = use default)
     max_retries: int = 2
     escalation_chain: list[str] = field(default_factory=list)
-
-    @property
-    def judge_prompt(self) -> str:
-        return self.judge_prompt_template or _JUDGE_PROMPT
-
-
-# Type alias for an async judge function
-JudgeFn = Callable[[str, str], Awaitable[tuple[bool, str]]]
-#                                  (passed, reason)
 
 
 @dataclass
@@ -67,17 +33,7 @@ class ValidationResult:
 
 
 class CascadeValidator:
-    """Validates LLM responses and triggers escalation when quality is insufficient.
-
-    Two validation tiers:
-    1. Rule-based (fast, free): refusal, truncation, empty, JSON format
-    2. LLM-as-Judge (opt-in): calls a cheap model to evaluate quality holistically
-
-    Verifier modes:
-    - rule_only:        Only rule checks (default, backward compatible)
-    - llm_judge:        Skip rules entirely, only use LLM judge
-    - rule_then_llm:    Run rules first; if they pass, then LLM judge
-    """
+    """Rule-based response validation. Escalates to a stronger model on failure."""
 
     # Patterns that indicate the model refused
     REFUSAL_PATTERNS = [
@@ -96,23 +52,13 @@ class CascadeValidator:
     # Minimum response length (characters)
     MIN_RESPONSE_LENGTH = 10
 
-    def __init__(
-        self,
-        config: CascadeConfig,
-        judge_fn: JudgeFn | None = None,
-    ) -> None:
+    def __init__(self, config: CascadeConfig) -> None:
         self.config = config
-        self._judge_fn = judge_fn
-
-    @property
-    def has_judge(self) -> bool:
-        """Whether an LLM judge is available."""
-        return self._judge_fn is not None
 
     def validate(
         self, response: ChatCompletionResponse, request: ChatCompletionRequest
     ) -> ValidationResult:
-        """Run rule-based validation only. For LLM judge, use judge_async()."""
+        """Run rule-based validation."""
         if not response.choices:
             return ValidationResult(False, "no_choices")
 
@@ -137,25 +83,6 @@ class CascadeValidator:
             return ValidationResult(False, "json_expected_but_invalid")
 
         return ValidationResult(True, "ok")
-
-    async def judge_async(
-        self, prompt: str, response_content: str
-    ) -> ValidationResult:
-        """Call the LLM judge to evaluate response quality.
-
-        Returns ValidationResult with judge_reason on failure.
-        If the judge call fails, treats as PASS (degradation).
-        """
-        if not self._judge_fn:
-            return ValidationResult(True, "no_judge_configured")
-        try:
-            passed, reason = await self._judge_fn(prompt, response_content)
-            if passed:
-                return ValidationResult(True, "judge_pass")
-            return ValidationResult(False, reason or "judge_fail")
-        except Exception as exc:
-            logger.warning("LLM judge call failed: %s — treating as pass", exc)
-            return ValidationResult(True, "judge_error")
 
     def get_next_model(
         self,
@@ -224,9 +151,16 @@ class CascadeValidator:
 
     @staticmethod
     def _wants_json(request: ChatCompletionRequest) -> bool:
-        """Check if the user likely expects a JSON response."""
+        """Check if the user likely expects a JSON response.
+
+        Only looks at user messages — assistant tool calls and system-reminder
+        injections routinely contain JSON-related text that would trigger a
+        false positive for every request in an agent session.
+        """
         prompt_lower = ""
         for msg in request.messages:
+            if msg.role != "user":
+                continue
             content = msg.content
             if isinstance(content, str):
                 prompt_lower += content.lower() + " "
