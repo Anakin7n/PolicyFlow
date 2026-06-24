@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 
 from .classifier import EmbeddingClassifier
@@ -89,9 +90,16 @@ class SessionMemory:
 def _extract_prompt(request: ChatCompletionRequest) -> str:
     """Return the text of the last real human message.
 
-    Skips XML-injected ``role=user`` blocks (system-reminders, tool results)
-    that agent clients like Claude Code emit between turns — those blocks
-    aren't a fresh user prompt and shouldn't drive classification.
+    Strips XML-injected blocks (``<system-reminder>…</system-reminder>``,
+    ``<command-name>…</command-name>``, ``<ide_selection>…</ide_selection>``,
+    ``<local-command-stdout>…</local-command-stdout>``, etc.) that agent
+    clients like Claude Code splice into the user turn — those aren't a fresh
+    user prompt and would otherwise drown out the real text during
+    classification.
+
+    Note: stripping happens *only* on the routing copy.  The original
+    ``PFMessage`` content is forwarded to the upstream model unchanged, so the
+    model still sees the full context Claude Code intended it to see.
     """
     last_user = None
     for msg in request.messages:
@@ -104,21 +112,21 @@ def _extract_prompt(request: ChatCompletionRequest) -> str:
         content = msg.content
         text = ""
         if isinstance(content, str):
-            text = content.strip()
+            text = content
         elif isinstance(content, list):
             parts = [
                 block.get("text", "")
                 for block in content
                 if isinstance(block, dict) and block.get("type") == "text"
             ]
-            text = "\n".join(parts).strip()
+            text = "\n".join(parts)
 
-        if not text:
-            continue
-        if not text.startswith("<"):
-            return text
+        cleaned = _strip_injected_blocks(text).strip()
+        if cleaned:
+            return cleaned
 
-    # All user messages appear injected — fall back to the last one we saw.
+    # Every user message was 100% injected blocks — fall back to the last
+    # message's raw text so we still have *something* to classify on.
     if last_user is not None:
         c = last_user.content
         if isinstance(c, str):
@@ -126,6 +134,30 @@ def _extract_prompt(request: ChatCompletionRequest) -> str:
         if isinstance(c, list):
             return "\n".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text").strip()
     return ""
+
+
+# Agent clients (Claude Code, Cursor, etc.) splice XML-tagged context blocks
+# into the user turn. Match any tag whose name is a single token of
+# letters/digits/_/- — non-greedy across newlines, paired open/close.
+_INJECTED_BLOCK_RE = re.compile(r"<([A-Za-z][\w-]*)\b[^>]*>.*?</\1>", re.DOTALL)
+
+
+def _strip_injected_blocks(text: str) -> str:
+    """Remove XML-tagged injected blocks from a user message.
+
+    Only matches paired ``<tag>...</tag>``; literal angle brackets in normal
+    prose ("if x < 5") and unmatched single tags are left alone.
+    """
+    if "<" not in text:
+        return text
+    # Run twice in case blocks are nested — non-greedy regex pairs the
+    # innermost tags first, a second pass picks up the outer wrapper.
+    prev = None
+    cur = text
+    while prev != cur:
+        prev = cur
+        cur = _INJECTED_BLOCK_RE.sub("", cur)
+    return cur
 
 
 def _estimate_tokens(text: str) -> int:
