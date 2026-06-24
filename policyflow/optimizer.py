@@ -132,9 +132,9 @@ async def generate_optimizations(
     # ── Format cascade anomalies ─────────────────────────────
     anomaly_lines = []
     for a in anomalies[:10]:
-        reason = a.get("judge_reason", "unknown")[:100]
+        preview = (a.get("prompt_preview") or "")[:100]
         anomaly_lines.append(
-            f"  policy={a['policy_name']} model={a['routed_model']}: {reason}"
+            f"  policy={a['policy_name']} model={a['routed_model']} attempts={a['cascade_attempts']}: {preview}"
         )
     anomaly_text = "\n".join(anomaly_lines) if anomaly_lines else "  (none)"
 

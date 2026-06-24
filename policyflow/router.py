@@ -39,12 +39,18 @@ def _session_key(request: ChatCompletionRequest) -> str:
 
 
 class SessionMemory:
-    """Remembers the model chosen for each conversation, for continuation turns.
+    """Remembers the model chosen for each conversation across all later turns.
 
-    A short follow-up like "继续" matches no policy and has no semantic content,
-    so it falls through to Phase 4.  When that happens and we've seen this
-    conversation before, we reuse the previous turn's model instead of dropping
-    to the fallback — the follow-up continues whatever task was underway.
+    Routing decisions are made on the *first* turn only.  Every subsequent turn
+    on the same conversation reuses the recorded model — this preserves the
+    upstream provider's prompt cache (Anthropic / DeepSeek cache hits cost
+    1/10 – 1/120 of misses; switching models mid-conversation evicts the
+    50k+ token prefix that agent clients like Claude Code accumulate, often
+    making the per-token bill several times higher than not routing at all).
+
+    The cached model is only overwritten when the cascade validator
+    successfully escalates to a stronger model (see ``promote``) — that's the
+    sole intended source of mid-conversation model changes.
     """
 
     def __init__(self, ttl: int = 1800, max_size: int = 10_000) -> None:
@@ -66,25 +72,32 @@ class SessionMemory:
             del self._store[oldest]
         self._store[key] = (model, policy_name, time.time() + self.ttl)
 
+    def promote(self, key: str, model: str) -> None:
+        """Replace the cached model after a successful cascade escalation.
 
-def _extract_prompt(request: ChatCompletionRequest) -> tuple[str, bool]:
-    """Return (prompt, is_new_turn) for the current request.
+        Keeps the original policy_name (the task type didn't change, only the
+        model serving it).  No-op if the session was never recorded — the next
+        call site will record it normally.
+        """
+        entry = self._store.get(key)
+        if entry is None:
+            return
+        _, policy_name, expiry = entry
+        self._store[key] = (model, policy_name, expiry)
 
-    *prompt* is the text of the last real human message (skipping XML-injected
-    ``role=user`` blocks from agent clients like Claude Code).
 
-    *is_new_turn* is True when the prompt came from the very last user message
-    — meaning the human just sent new input.  When all recent user messages are
-    injected blocks and the real prompt sits further back in history, this is
-    an internal agent follow-up (tool loop continuation) and *is_new_turn* is
-    False.
+def _extract_prompt(request: ChatCompletionRequest) -> str:
+    """Return the text of the last real human message.
+
+    Skips XML-injected ``role=user`` blocks (system-reminders, tool results)
+    that agent clients like Claude Code emit between turns — those blocks
+    aren't a fresh user prompt and shouldn't drive classification.
     """
     last_user = None
     for msg in request.messages:
         if msg.role == "user":
             last_user = msg
 
-    found_newest = None
     for msg in reversed(request.messages):
         if msg.role != "user":
             continue
@@ -103,22 +116,16 @@ def _extract_prompt(request: ChatCompletionRequest) -> tuple[str, bool]:
         if not text:
             continue
         if not text.startswith("<"):
-            if found_newest is None:
-                found_newest = text
-                is_new_turn = (msg is last_user)
-            break
-
-    if found_newest is not None:
-        return found_newest, is_new_turn
+            return text
 
     # All user messages appear injected — fall back to the last one we saw.
     if last_user is not None:
         c = last_user.content
         if isinstance(c, str):
-            return c.strip(), False
+            return c.strip()
         if isinstance(c, list):
-            return "\n".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text").strip(), False
-    return "", False
+            return "\n".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text").strip()
+    return ""
 
 
 def _estimate_tokens(text: str) -> int:
@@ -185,49 +192,65 @@ class Router:
     async def route(self, request: ChatCompletionRequest) -> RouteDecision:
         """Decide which model to route this request to.
 
-        Decision priority:
-        1. Image detection → visual model (explicit rule)
-        2. Keyword exact match + Embedding verification (catches false hits like
-           "苹果手机" matching a fruit policy)
-        3. Embedding similarity match (main classification path)
-        4. Default policy — fallback
+        First-turn classification, then sticky for the rest of the conversation
+        ============================================================
+        A full Phase 1-4 classification runs only on the *first* turn of a
+        conversation (no SessionMemory entry yet, or it has expired).  Every
+        subsequent turn on the same session — identified by the system + first
+        user message hash — short-circuits to the recorded model, skipping
+        embedding lookup entirely.
 
-        When a policy uses `specialty` (capability routing), the best model
-        is selected automatically by capability score within the policy's
-        max_cost_tier budget (the tier bounds the pool; the score picks the
-        most capable model in it).
+        Why: agent clients like Claude Code accumulate 50k+ tokens of stable
+        prefix (system prompt + tool definitions + history) per turn.  Upstream
+        prompt cache (Anthropic / DeepSeek) discounts the cached prefix 10-120x
+        on hits, but the cache is keyed per (provider, model) — switching
+        models mid-conversation evicts the entire prefix.  Re-classifying every
+        turn was making the bill *worse*, not better.  The cascade validator
+        (see ``SessionMemory.promote``) is the only mechanism allowed to change
+        the model mid-conversation.
+
+        First-turn decision priority:
+        1. Image detection → visual model (explicit rule)
+        2. Keyword exact match + Embedding verification (catches false hits)
+        3. Embedding similarity match (main classification path)
+        4. Default fallback model
         """
         available = self.config.available_models
-        prompt, is_new_turn = _extract_prompt(request)
         session_key = _session_key(request)
-        token_estimate = _estimate_tokens(prompt)
-        has_img = _has_image(request.messages)
 
         def decide(policy: Policy | None, method: str, score: float) -> RouteDecision:
             """Construct a RouteDecision with all router-level context wired in."""
-            return RouteDecision(
+            d = RouteDecision(
                 policy, method, score,
                 available_models=available,
                 use_capability=self.engine.uses_capability_routing(policy) if policy else False,
                 cost_tier_thresholds=self.cost_tier_thresholds,
                 original_model=request.model,
             )
+            d.session_key = session_key
+            return d
 
-        # Internal agent follow-up (tool loop): no new human input — lock to
-        # the session's previous model.  Skip embedding, no API call.
-        if not is_new_turn and session_key:
+        # Sticky fast path: every turn after the first reuses the recorded
+        # model.  No classification, no embedding API call, no policy match —
+        # the upstream prompt cache keeps paying off.
+        if session_key:
             prev_model, prev_policy = self.sessions.get(session_key)
             if prev_model:
-                return decide(None, "session_continuation", 0.0).with_model(prev_model).with_inherited_policy(prev_policy)
+                d = decide(None, "session_sticky", 0.0).with_model(prev_model).with_inherited_policy(prev_policy)
+                d.session_status = "sticky"
+                return d
+
+        # First turn — run the full classifier pipeline below.
+        prompt = _extract_prompt(request)
+        token_estimate = _estimate_tokens(prompt)
+        has_img = _has_image(request.messages)
 
         def finalize(decision: RouteDecision) -> RouteDecision:
-            """Record this turn's model for the session, then return the decision.
-
-            Lets a later continuation turn ("继续") reuse this model in Phase 4.
-            """
+            """Record this turn's model in SessionMemory so later turns stick to it."""
             if session_key:
                 pn = decision.policy.name if decision.policy else ""
                 self.sessions.set(session_key, decision.target_model, pn)
+            decision.session_status = "first"
             return decision
 
         # Phase 1: Image detection (explicit rule)
@@ -288,21 +311,15 @@ class Router:
             except Exception as exc:
                 logger.warning("Embedding classification failed, no policy matched: %s", exc)
 
-        # Phase 4: Nothing matched. A continuation turn ("继续") carries no
-        # routable signal — reuse the session's previous model if we have one;
-        # otherwise fall back to the single fallback model.
-        if session_key:
-            prev_model, prev_policy = self.sessions.get(session_key)
-            if prev_model:
-                return decide(None, "session_continuation", embed_score).with_model(prev_model).with_inherited_policy(prev_policy)
-
-        return decide(None, "fallback", 0.0).with_model(self.fallback_model)
+        # Phase 4: Nothing matched — first turn falls through to the fallback
+        # model.  Record it so subsequent turns also stick to this choice.
+        return finalize(decide(None, "fallback", 0.0).with_model(self.fallback_model))
 
 
 class RouteDecision:
     """Result of a routing decision."""
 
-    __slots__ = ("policy", "method", "score", "target_model", "inherited_policy_name")
+    __slots__ = ("policy", "method", "score", "target_model", "inherited_policy_name", "session_key", "session_status")
 
     def __init__(
         self,
@@ -318,6 +335,8 @@ class RouteDecision:
         self.method = method
         self.score = score
         self.inherited_policy_name = ""
+        self.session_key = ""
+        self.session_status = ""  # "first" | "sticky" | "escalated" — filled in by Router
         if policy and use_capability and available_models:
             from .model_profiles import select_best_models
             task = policy.name
@@ -346,7 +365,7 @@ class RouteDecision:
         return self
 
     def with_inherited_policy(self, policy_name: str) -> "RouteDecision":
-        """Carry the previous turn's policy for session_continuation."""
+        """Carry the first turn's policy through sticky follow-up turns."""
         self.inherited_policy_name = policy_name
         return self
 

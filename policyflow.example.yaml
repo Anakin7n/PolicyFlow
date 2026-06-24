@@ -171,6 +171,12 @@ policies_hybrid:
   - name: "图片理解"
     match:
       has_image: true
+    description:
+      - "看图描述、识别图片内容、解读截图、分析图表"
+      - "这张图里有什么?帮我看看这个截图说明了什么问题"
+      - "解读这张报表/流程图/UI 截图"
+      - "从图片中提取文字、识别表格内容"
+      - "看图回答问题、视觉问答"
     route_to: "qwen-vl-plus"
 
   - name: "代码生成"
@@ -181,6 +187,12 @@ policies_hybrid:
         "正则", "regex", "脚本", "shell", "bash",
         "如何实现"
       ]
+    description:
+      - "写一段代码、生成函数、实现算法、写脚本"
+      - "帮我写一个 X、用 Y 实现 Z、给我一段 SQL/正则/Shell"
+      - "实现某个功能、从零写出可运行代码"
+      - "写 API 接口、写数据结构、写完整模块"
+      - "算法题、编程题、把这个需求翻译成代码"
     route_to: "deepseek-v4-pro"
 
   - name: "代码审查与调试"
@@ -190,6 +202,12 @@ policies_hybrid:
         "重构", "refactor", "单元测试", "写测试", "test case",
         "报错", "异常", "stacktrace"
       ]
+    description:
+      - "看这段代码有什么问题、为什么报错、帮我修 bug、调试异常"
+      - "代码 review、找 bug、解读 stacktrace、定位错误原因"
+      - "重构这段代码、改进可读性、写单元测试"
+      - "这段代码安全吗?有什么坑?"
+      - "性能/逻辑/边界条件检查"
     route_to: "glm-5.2"
 
   - name: "数据分析与处理"
@@ -199,6 +217,12 @@ policies_hybrid:
         "统计", "趋势", "异常值", "数据可视化", "图表",
         "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
       ]
+    description:
+      - "分析这份数据、看出趋势、找异常值、做数据清洗"
+      - "Excel/CSV/表格处理、pandas 操作、groupby 透视"
+      - "数据可视化建议、生成图表、统计描述"
+      - "解读统计结果、对比两组数据"
+      - "数据预处理、特征工程、缺失值处理"
     route_to: "glm-5.2"
 
   - name: "文本创作与写作"
@@ -211,6 +235,12 @@ policies_hybrid:
         "写诗", "写歌词", "故事", "小说", "剧本",
         "扩写", "续写", "改写"
       ]
+    description:
+      - "写一篇文章/邮件/文案/小说/诗"
+      - "起标题、写广告语、产品介绍、宣传文案"
+      - "公众号、小红书、朋友圈风格写作"
+      - "故事创作、剧本、续写扩写"
+      - "改写润色、调整语气、风格转换"
     route_to: "deepseek-v4-flash"
 
   - name: "翻译、摘要、格式化"
@@ -223,6 +253,12 @@ policies_hybrid:
         "润色", "polish"
       ]
       max_input_tokens: 800
+    description:
+      - "把这段翻译成英文/中文/日文等其他语言"
+      - "总结这段内容、提炼要点、生成摘要"
+      - "格式化文本、整理排版、转 Markdown/HTML"
+      - "校对纠错、修改语法、polish 文字"
+      - "中英互译、跨语言转换"
     route_to: "deepseek-v4-flash"
 
   - name: "复杂推理与分析"
@@ -233,6 +269,12 @@ policies_hybrid:
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
+    description:
+      - "数学证明、定理推导、求证、严格论证"
+      - "多步推理、逻辑分析、因果推断"
+      - "方案对比权衡、tradeoff 分析、决策推理"
+      - "复盘事件、深度归因、找出根本原因"
+      - "因果链分析、严密论证"
     route_to: "deepseek-pro"
 
   - name: "系统架构与设计"
@@ -242,6 +284,12 @@ policies_hybrid:
         "微服务", "高并发", "分布式", "数据库设计"
       ]
       min_input_tokens: 200
+    description:
+      - "设计一个 X 系统、技术方案、架构图"
+      - "微服务/分布式/高并发/数据库 设计"
+      - "技术选型、组件拆分、模块划分"
+      - "容量规划、扩展性设计、可用性方案"
+      - "从零设计端到端工程方案"
     route_to: "glm-5.2"
 
   - name: "安全审计与分析"
@@ -251,6 +299,12 @@ policies_hybrid:
         "渗透", "加密", "鉴权", "授权", "OAuth"
       ]
       min_input_tokens: 150
+    description:
+      - "这段代码/配置有安全风险吗、做威胁建模"
+      - "找漏洞、检查注入、XSS、CSRF、权限漏洞"
+      - "鉴权/授权/OAuth 流程审计"
+      - "加密方案是否安全、密钥管理、敏感数据保护"
+      - "渗透测试思路、安全合规检查"
     route_to: "glm-5.2"
 
   - name: "性能分析与调优"
@@ -260,6 +314,12 @@ policies_hybrid:
         "加速", "慢查询", "优化SQL", "高延迟"
       ]
       min_input_tokens: 150
+    description:
+      - "这段代码/SQL 慢在哪、找性能瓶颈"
+      - "优化响应时间、降低延迟、提升 QPS"
+      - "SQL 慢查询分析、索引优化"
+      - "CPU/内存/IO 调优、profiling 分析"
+      - "高并发场景下的性能改进"
     route_to: "deepseek-v4-pro"
 
   - name: "知识问答与学习"
@@ -272,6 +332,12 @@ policies_hybrid:
         "讲讲", "介绍下", "科普", "解读"
       ]
       min_input_tokens: 60        # 排除"为什么呢"这类闲聊式短问
+    description:
+      - "为什么 X 会这样、X 的工作原理是什么"
+      - "X 和 Y 的区别、对比解释、关系梳理"
+      - "入门 X 应该怎么学、推荐学习路径"
+      - "解释概念、科普某个领域、追溯起源/历史"
+      - "因果机制解释、原理性回答"
     route_to: "deepseek-v4-pro"
 
   - name: "日常闲聊与简单问答"
@@ -284,6 +350,12 @@ policies_hybrid:
         "什么是", "怎么样", "好吗"
       ]
       max_input_tokens: 150       # 短问句兜住，长文走更深的策略
+    description:
+      - "你好、hi、在吗、谢谢、晚安"
+      - "你是谁、你能做什么、你叫什么名字"
+      - "寒暄、招呼、确认收到、客套话"
+      - "自我介绍类问答"
+      - "客套礼貌用语、问候"
     route_to: "deepseek-v4-flash"
 
 # ── 算法全托管（capability 模式使用）───────────────────────────────
@@ -485,6 +557,12 @@ policies_explicit:
   - name: "图片理解"
     match:
       has_image: true
+    description:
+      - "看图描述、识别图片内容、解读截图、分析图表"
+      - "这张图里有什么?帮我看看这个截图说明了什么问题"
+      - "解读这张报表/流程图/UI 截图"
+      - "从图片中提取文字、识别表格内容"
+      - "看图回答问题、视觉问答"
     route_to: "qwen-vl-plus"
 
   - name: "代码生成"
@@ -495,6 +573,12 @@ policies_explicit:
         "正则", "regex", "脚本", "shell", "bash",
         "如何实现"
       ]
+    description:
+      - "写一段代码、生成函数、实现算法、写脚本"
+      - "帮我写一个 X、用 Y 实现 Z、给我一段 SQL/正则/Shell"
+      - "实现某个功能、从零写出可运行代码"
+      - "写 API 接口、写数据结构、写完整模块"
+      - "算法题、编程题、把这个需求翻译成代码"
     route_to: "deepseek-v4-pro"
 
   - name: "代码审查与调试"
@@ -504,6 +588,12 @@ policies_explicit:
         "重构", "refactor", "单元测试", "写测试", "test case",
         "报错", "异常", "stacktrace"
       ]
+    description:
+      - "看这段代码有什么问题、为什么报错、帮我修 bug、调试异常"
+      - "代码 review、找 bug、解读 stacktrace、定位错误原因"
+      - "重构这段代码、改进可读性、写单元测试"
+      - "这段代码安全吗?有什么坑?"
+      - "性能/逻辑/边界条件检查"
     route_to: "glm-5.2"
 
   - name: "数据分析与处理"
@@ -513,6 +603,12 @@ policies_explicit:
         "统计", "趋势", "异常值", "数据可视化", "图表",
         "对比数据", "groupby", "透视", "数据清洗", "DataFrame", "pandas"
       ]
+    description:
+      - "分析这份数据、看出趋势、找异常值、做数据清洗"
+      - "Excel/CSV/表格处理、pandas 操作、groupby 透视"
+      - "数据可视化建议、生成图表、统计描述"
+      - "解读统计结果、对比两组数据"
+      - "数据预处理、特征工程、缺失值处理"
     route_to: "glm-5.2"
 
   - name: "文本创作与写作"
@@ -525,6 +621,12 @@ policies_explicit:
         "写诗", "写歌词", "故事", "小说", "剧本",
         "扩写", "续写", "改写"
       ]
+    description:
+      - "写一篇文章/邮件/文案/小说/诗"
+      - "起标题、写广告语、产品介绍、宣传文案"
+      - "公众号、小红书、朋友圈风格写作"
+      - "故事创作、剧本、续写扩写"
+      - "改写润色、调整语气、风格转换"
     route_to: "deepseek-v4-flash"
 
   - name: "翻译、摘要、格式化"
@@ -537,6 +639,12 @@ policies_explicit:
         "润色", "polish"
       ]
       max_input_tokens: 800
+    description:
+      - "把这段翻译成英文/中文/日文等其他语言"
+      - "总结这段内容、提炼要点、生成摘要"
+      - "格式化文本、整理排版、转 Markdown/HTML"
+      - "校对纠错、修改语法、polish 文字"
+      - "中英互译、跨语言转换"
     route_to: "deepseek-v4-flash"
 
   - name: "复杂推理与分析"
@@ -547,6 +655,12 @@ policies_explicit:
         "复盘", "深度分析", "评估"
       ]
       min_input_tokens: 200
+    description:
+      - "数学证明、定理推导、求证、严格论证"
+      - "多步推理、逻辑分析、因果推断"
+      - "方案对比权衡、tradeoff 分析、决策推理"
+      - "复盘事件、深度归因、找出根本原因"
+      - "因果链分析、严密论证"
     route_to: "deepseek-v4-pro"
 
   - name: "系统架构与设计"
@@ -556,6 +670,12 @@ policies_explicit:
         "微服务", "高并发", "分布式", "数据库设计"
       ]
       min_input_tokens: 200
+    description:
+      - "设计一个 X 系统、技术方案、架构图"
+      - "微服务/分布式/高并发/数据库 设计"
+      - "技术选型、组件拆分、模块划分"
+      - "容量规划、扩展性设计、可用性方案"
+      - "从零设计端到端工程方案"
     route_to: "glm-5.2"
 
   - name: "安全审计与分析"
@@ -565,6 +685,12 @@ policies_explicit:
         "渗透", "加密", "鉴权", "授权", "OAuth"
       ]
       min_input_tokens: 150
+    description:
+      - "这段代码/配置有安全风险吗、做威胁建模"
+      - "找漏洞、检查注入、XSS、CSRF、权限漏洞"
+      - "鉴权/授权/OAuth 流程审计"
+      - "加密方案是否安全、密钥管理、敏感数据保护"
+      - "渗透测试思路、安全合规检查"
     route_to: "glm-5.2"
 
   - name: "性能分析与调优"
@@ -574,6 +700,12 @@ policies_explicit:
         "加速", "慢查询", "优化SQL", "高延迟"
       ]
       min_input_tokens: 150
+    description:
+      - "这段代码/SQL 慢在哪、找性能瓶颈"
+      - "优化响应时间、降低延迟、提升 QPS"
+      - "SQL 慢查询分析、索引优化"
+      - "CPU/内存/IO 调优、profiling 分析"
+      - "高并发场景下的性能改进"
     route_to: "deepseek-v4-pro"
 
   - name: "知识问答与学习"
@@ -586,6 +718,12 @@ policies_explicit:
         "讲讲", "介绍下", "科普", "解读"
       ]
       min_input_tokens: 60
+    description:
+      - "为什么 X 会这样、X 的工作原理是什么"
+      - "X 和 Y 的区别、对比解释、关系梳理"
+      - "入门 X 应该怎么学、推荐学习路径"
+      - "解释概念、科普某个领域、追溯起源/历史"
+      - "因果机制解释、原理性回答"
     route_to: "deepseek-v4-pro"
 
   - name: "日常闲聊与简单问答"
@@ -598,6 +736,12 @@ policies_explicit:
         "什么是", "怎么样", "好吗"
       ]
       max_input_tokens: 150
+    description:
+      - "你好、hi、在吗、谢谢、晚安"
+      - "你是谁、你能做什么、你叫什么名字"
+      - "寒暄、招呼、确认收到、客套话"
+      - "自我介绍类问答"
+      - "客套礼貌用语、问候"
     route_to: "deepseek-v4-flash"
 
 # ══════════════════════════════════════════════════════════════════════

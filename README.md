@@ -327,12 +327,6 @@ Textual 响应式 TUI 仪表盘，七个模块卡片，支持独立滚动：
 - **AI Optimization** — 内嵌优化建议
 - **Recent Requests** — 最近请求明细（可滚动）
 
-![Dashboard — Auto-Routing](docs/images/dashboard-2.png)
-
-![Dashboard — Daily Cost, Optimization & Recent](docs/images/dashboard-3.png)
-
-![Dashboard — Stats & Policy Distribution & Model Usage](docs/images/dashboard-1.png)
-
 ```bash
 python -m policyflow report
 python -m policyflow report --since 7d
@@ -372,13 +366,14 @@ python -m policyflow optimize --since 30d
   │
   ↓ PolicyFlow 收到后依次跑下面 4 步
   │
-  ├── ① 策略匹配（按 YAML policies 从上到下扫，只看当前轮最新一条用户消息）
-  │     图片检测 → 命中即停
-  │     关键词精确匹配命中 → Embedding 复核语境（≥阈值 才放行，挡掉"苹果"匹"苹果手机"这类歧义）
-  │     未命中 → Embedding 全局语义匹配
-  │     仍未命中 → 看会话记忆：本会话上一轮有模型则沿用（承接 "继续" 这类无语义跟进），
-  │                否则走统一兜底模型（fallback_model）
-  │     → 命中后确定任务类型（如"代码生成"、"复杂推理"）
+  ├── ① 路由决策
+  │     ① 续轮（同一会话已经分类过）→ 直接沿用上次的模型，跳过分类，**保护上游 prompt cache**
+  │     ② 首轮（新会话）按 YAML policies 从上到下扫，只看当前轮最新一条用户消息：
+  │        图片检测 → 命中即停
+  │        关键词精确匹配命中 → Embedding 复核语境（≥阈值 才放行，挡掉"苹果"匹"苹果手机"这类歧义）
+  │        未命中 → Embedding 全局语义匹配
+  │        仍未命中 → 走统一兜底模型（fallback_model）
+  │     → 命中后确定任务类型（如"代码生成"、"复杂推理"）作为后续选模依据
   │
   ├── ② 路由决策：根据任务类型选模型
   │     策略写了 route_to → 直接用
@@ -494,19 +489,26 @@ embedding:
 
 Embedding API 不可用时此阶段自动跳过，请求落到兜底逻辑。这是 PolicyFlow 设计的**降级路径**之一。
 
-### 兜底与会话承接
+### 会话粘性与兜底
 
-前面所有规则（图片检测、关键词匹配、Embedding 语义匹配）都没命中时，路由器按这个顺序兜底：
+路由器对每个会话（以 system + 首条用户消息的哈希为键识别，无需客户端传任何头）只在**首轮**跑完整分类管道；同会话的后续 turn 直接沿用首轮决定的模型，**完全跳过分类**。这样做不是为了省 embedding 调用，而是为了**保住上游供应商的 prompt cache**：
 
-1. **会话承接**——查本会话（以 system + 首条用户消息的哈希为键识别，无需客户端传任何头）上一轮用过的模型，有则沿用。这样像「继续」「接着写」这类**本身无语义、无法匹配任何策略**的跟进请求，会延续上一轮任务所用的模型，而不是被当成闲聊掉到便宜档。会话记忆有 TTL，过期即清。
-2. **统一兜底模型**——没有可沿用的上一轮（如会话首句就没匹配上），走 `upstream.fallback_model`。这同时也是上游供应商全部失败时的容灾模型，二者整合为同一个兜底出口；日志的 `method` 字段区分两种触发源（`session_continuation` / `fallback`）。
+- Anthropic / DeepSeek 等都对**输入 token 的最长前缀**做缓存，命中价仅为未命中的 1/10 ~ 1/120。
+- Claude Code 这类 agent 客户端每轮请求里，system prompt + tool 定义 + 历史对话累计可达 50k+ tokens，**95% 以上是稳定前缀**。
+- 中途切模型 = 整段前缀按未命中价重算，可能让账单几倍上涨——比"不路由"还贵。
+
+唯一会让粘定模型发生变化的路径是**级联升级**：便宜模型的响应被规则验证器判为拒答/截断/格式异常时，自动切到更强模型并把新模型写回会话记忆，后续 turn 都用升级后的模型。
+
+首轮三个匹配阶段（图片 / 关键词+复核 / Embedding）全部未命中时，走统一兜底模型 `upstream.fallback_model`。
 
 ```yaml
 upstream:
-  fallback_model: "deepseek-v4-flash"   # 没命中任何策略、又无上一轮可沿用时的兜底
+  fallback_model: "deepseek-v4-flash"   # 首轮没匹配到任何策略时的兜底
 ```
 
-**最佳实践：多写几条策略覆盖常见场景**（闲聊、概念问答、邮件草稿…），让请求精确路由到合适的便宜模型，比让"漏网"请求都流向兜底更省钱。示例 yaml 的「日常闲聊与简单问答」策略就是这个思路：用关键词 + token 上限拦住短问句，分流到便宜模型。
+**最佳实践：多写几条策略覆盖常见场景**（闲聊、概念问答、邮件草稿…），让首轮请求能精确匹配到合适的便宜模型，比让"漏网"请求都流向兜底更省钱。示例 yaml 的「日常闲聊与简单问答」策略就是这个思路：用关键词 + token 上限拦住短问句，分流到便宜模型。
+
+**进阶用法：按主题分会话**。同一会话里跳到完全不同的任务时，路由仍按首轮那条任务来（由 cascade 兜底质量）。如果想让"写代码"和"翻译润色"各自匹配到最优模型，为不同主题各开一个新会话即可——这也是性价比最高的精细化控制方式。
 
 ### 能力感知路由（智能选模）
 
@@ -687,9 +689,10 @@ logging:
 X-PolicyFlow-Policy: 翻译、摘要、格式化
 X-PolicyFlow-Method: keyword_match
 X-PolicyFlow-Score: 1.000
+X-PolicyFlow-Session: first         # first=首轮分类 / sticky=续轮承接
 ```
 
-不查日志就能知道"为什么走了这个模型"。
+不查日志就能知道"为什么走了这个模型"。同一会话从第二轮开始 `X-PolicyFlow-Session` 会是 `sticky`，意味着这次没跑分类、直接沿用首轮决定，**上游 prompt cache 不会被打断**。
 
 ## 成本计算
 
@@ -726,7 +729,7 @@ PolicyFlow/
 │   ├── anthropic_adapter.py # Anthropic Messages API ↔ OpenAI 协议适配
 │   ├── policy.py         # 策略数据模型
 │   ├── classifier.py     # Embedding 分类器（含关键词复核）
-│   ├── router.py         # 路由决策引擎（含会话承接 + 统一兜底）
+│   ├── router.py         # 路由决策引擎（首轮分类 + 会话粘性）
 │   ├── cascade.py        # 规则验证器 + 能力评分升级
 │   ├── db.py             # SQLite 日志层
 │   ├── cost.py           # 39 个模型定价

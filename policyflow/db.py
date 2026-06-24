@@ -41,19 +41,22 @@ CREATE INDEX IF NOT EXISTS idx_requests_policy ON requests(policy_name);
 MIGRATIONS = [
     "ALTER TABLE requests ADD COLUMN prompt_hash TEXT DEFAULT ''",
     "ALTER TABLE requests ADD COLUMN prompt_preview TEXT DEFAULT ''",
-    "ALTER TABLE requests ADD COLUMN judge_reason TEXT DEFAULT ''",
+    "ALTER TABLE requests ADD COLUMN session_status TEXT DEFAULT ''",
+    "ALTER TABLE requests DROP COLUMN judge_reason",
+    "ALTER TABLE requests ADD COLUMN session_key TEXT DEFAULT ''",
 ]
 
 
 def _migrate_schema() -> None:
     """Apply schema migrations. Each migration is attempted once;
-    if the column already exists, the error is ignored."""
+    if the column already exists (ADD) or already removed (DROP), the
+    OperationalError is ignored and the next migration runs."""
     conn = sqlite3.connect(str(DB_PATH))
     for sql in MIGRATIONS:
         try:
             conn.execute(sql)
         except sqlite3.OperationalError:
-            pass  # Column already exists
+            pass  # idempotent — column state already matches the goal
     conn.commit()
     conn.close()
 
@@ -100,7 +103,8 @@ def log_request(
     success: bool,
     prompt_hash: str = "",
     prompt_preview: str = "",
-    judge_reason: str = "",
+    session_status: str = "",
+    session_key: str = "",
 ) -> None:
     """Insert a request log entry."""
     conn = get_db()
@@ -110,8 +114,8 @@ def log_request(
             method, similarity_score, prompt_tokens, completion_tokens,
             total_tokens, estimated_cost, compared_cost,
             cascade_attempts, duration_ms, success,
-            prompt_hash, prompt_preview, judge_reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            prompt_hash, prompt_preview, session_status, session_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             time.strftime("%Y-%m-%d %H:%M:%S"),
             user,
@@ -130,7 +134,8 @@ def log_request(
             1 if success else 0,
             prompt_hash,
             prompt_preview,
-            judge_reason,
+            session_status,
+            session_key,
         ),
     )
     conn.commit()
@@ -160,6 +165,38 @@ def query_summary(days: int = 30) -> dict:
         "compared_cost": round(row["compared_cost"], 4),
         "saved_amount": round(saved, 4),
         "saved_pct": round(saved_pct, 1),
+    }
+
+
+def query_session_stats(days: int = 30) -> dict:
+    """Conversation-level metrics that show the session-stickiness strategy
+    is actually working: how many distinct sessions, average turns per
+    session, and what fraction of turns were sticky (i.e. saved an
+    embedding round-trip and preserved upstream prompt cache).
+
+    Only counts rows with a non-empty ``session_key`` — older logs from
+    before the column was introduced are excluded so the averages aren't
+    diluted by missing data.
+    """
+    conn = get_db()
+    row = conn.execute(
+        """SELECT
+             COUNT(DISTINCT session_key) AS sessions,
+             COUNT(*) AS turns,
+             SUM(CASE WHEN session_status = 'sticky' THEN 1 ELSE 0 END) AS sticky_turns
+           FROM requests
+           WHERE timestamp >= date('now', ? || ' days')
+             AND session_key != ''""",
+        (f"-{days}",),
+    ).fetchone()
+    conn.close()
+    sessions = row["sessions"] or 0
+    turns = row["turns"] or 0
+    sticky = row["sticky_turns"] or 0
+    return {
+        "sessions": sessions,
+        "avg_turns": round(turns / sessions, 1) if sessions else 0.0,
+        "sticky_pct": round(sticky / turns * 100, 1) if turns else 0.0,
     }
 
 
@@ -241,7 +278,7 @@ def query_recent_requests(limit: int = 50) -> list[dict]:
     rows = conn.execute(
         """SELECT timestamp, user, original_model, routed_model,
                   policy_name, method, prompt_tokens, completion_tokens,
-                  estimated_cost, cascade_attempts, success
+                  estimated_cost, cascade_attempts, success, session_status
            FROM requests ORDER BY timestamp DESC LIMIT ?""",
         (limit,),
     ).fetchall()
@@ -250,26 +287,46 @@ def query_recent_requests(limit: int = 50) -> list[dict]:
 
 
 def query_capability_breakdown(days: int = 30) -> list[dict]:
-    """For capability-routed requests (method = 'capability(<task>)'), break
-    down by task type → which model the system auto-selected, with counts/cost.
+    """For capability-routed requests, break down by task → routed model.
 
-    Returns rows: {method, routed_model, requests, cost}. Empty when no
-    capability routing has happened yet (e.g. all policies use route_to).
+    Aggregates by ``policy_name`` (not ``method``) so that sticky follow-up
+    turns — whose method is ``session_sticky`` but whose ``policy_name`` was
+    inherited from the first turn's capability decision — are counted toward
+    the same task.  Without this, sticky turns (the majority of agent traffic)
+    would silently vanish from the breakdown.
+
+    Filtered to rows whose first-turn classification was a capability route,
+    detected by looking at the first turn's ``method`` for each policy.
+
+    Returns rows: {method, routed_model, requests, cost}.  ``method`` here is
+    the policy's display label like ``capability(代码生成)``; we re-synthesize
+    it from policy_name for backward compatibility with the dashboard renderer.
     """
     conn = get_db()
     rows = conn.execute(
-        """SELECT method, routed_model,
+        """SELECT policy_name, routed_model,
                   COUNT(*) as requests,
                   COALESCE(SUM(estimated_cost), 0) as cost
            FROM requests
            WHERE timestamp >= date('now', ? || ' days')
-             AND method LIKE 'capability(%'
-           GROUP BY method, routed_model
-           ORDER BY method, cost DESC""",
+             AND policy_name IN (
+               SELECT DISTINCT policy_name FROM requests
+               WHERE method LIKE 'capability(%'
+             )
+           GROUP BY policy_name, routed_model
+           ORDER BY policy_name, cost DESC""",
         (f"-{days}",),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [
+        {
+            "method": f"capability({r['policy_name']})",
+            "routed_model": r["routed_model"],
+            "requests": r["requests"],
+            "cost": r["cost"],
+        }
+        for r in rows
+    ]
 
 def query_policy_stats(days: int = 30) -> list[dict]:
     """Per-policy statistics for the AI optimizer."""
@@ -313,15 +370,15 @@ def query_unmatched_prompts(days: int = 30, limit: int = 20) -> list[dict]:
 
 
 def query_cascade_anomalies(days: int = 30, limit: int = 30) -> list[dict]:
-    """Get failed cascade attempts with judge reasons for the optimizer."""
+    """Get requests that triggered cascade escalation — signals where the
+    cheap model failed validation, useful for the optimizer to detect
+    policies whose cheap-tier model is consistently inadequate."""
     conn = get_db()
     rows = conn.execute(
-        """SELECT policy_name, routed_model, judge_reason,
-                  prompt_preview, cascade_attempts
+        """SELECT policy_name, routed_model, prompt_preview, cascade_attempts
            FROM requests
            WHERE timestamp >= date('now', ? || ' days')
              AND cascade_attempts > 0
-             AND judge_reason != ''
            ORDER BY id DESC LIMIT ?""",
         (f"-{days}", limit),
     ).fetchall()
@@ -336,7 +393,7 @@ def query_export(days: int = 30) -> list[dict]:
         """SELECT timestamp, user, original_model, routed_model, policy_name,
                   method, similarity_score, prompt_tokens, completion_tokens,
                   estimated_cost, compared_cost, cascade_attempts,
-                  duration_ms, success, judge_reason, prompt_hash, prompt_preview
+                  duration_ms, success, prompt_hash, prompt_preview, session_status
            FROM requests
            WHERE timestamp >= date('now', ? || ' days')
            ORDER BY id DESC""",
@@ -346,25 +403,30 @@ def query_export(days: int = 30) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def query_match_quality(days: int = 30) -> dict:
-    """Count requests by match quality: direct / continuation / fallback."""
+def query_health(days: int = 30) -> dict:
+    """Two product-health metrics: success rate and cascade rate.
+
+    - success_pct: how often the request returned a normal response
+    - cascade_pct: how often a cheaper model failed validation and triggered
+      escalation — a proxy for "how often the first-turn classifier was
+      optimistic enough that a stronger model was needed".
+    """
     conn = get_db()
-    quality = conn.execute(
+    row = conn.execute(
         """SELECT
-             CASE
-               WHEN method IN ('session_continuation') THEN 'Indirect'
-               WHEN method IN ('fallback', 'passthrough') THEN 'Failed'
-               ELSE 'Direct'
-             END as match_type,
-             COUNT(*) as cnt
+             COUNT(*) as total,
+             SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as succeeded,
+             SUM(CASE WHEN cascade_attempts > 0 THEN 1 ELSE 0 END) as cascaded
            FROM requests
-           WHERE timestamp >= date('now', ? || ' days')
-           GROUP BY match_type""",
+           WHERE timestamp >= date('now', ? || ' days')""",
         (f"-{days}",),
-    ).fetchall()
+    ).fetchone()
     conn.close()
-    total = sum(r["cnt"] for r in quality)
-    result = {"Direct": 0, "Indirect": 0, "Failed": 0, "total": total or 1}
-    for r in quality:
-        result[r["match_type"]] = r["cnt"]
-    return result
+    total = row["total"] or 0
+    if total == 0:
+        return {"total": 0, "success_pct": 0.0, "cascade_pct": 0.0}
+    return {
+        "total": total,
+        "success_pct": round((row["succeeded"] or 0) / total * 100, 1),
+        "cascade_pct": round((row["cascaded"] or 0) / total * 100, 1),
+    }

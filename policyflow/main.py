@@ -5,6 +5,7 @@ Week 6: multi-provider routing + rule-based cascade + CLI + AI optimizer.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -107,7 +108,6 @@ async def anthropic_messages(
         prompt_text = str(last_msg)
     prompt_hash_val = hash_prompt(prompt_text) if prompt_text else ""
     prompt_preview_val = prompt_text[:500] if config.log_prompt_preview else ""
-    judge_reason_val = ""
     user = fastapi_request.headers.get("X-User", "default")
     response = None
     cascade_attempts = 0
@@ -155,9 +155,11 @@ async def anthropic_messages(
                 "success": success, "prompt_hash": prompt_hash_val,
                 "prompt_preview": prompt_preview_val,
                 "baseline_model": config.baseline_model,
+                "session_status": decision.session_status,
+                "session_key": decision.session_key,
             }
             wrapped = _stream_with_logging(raw_stream, log_params)
-            return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score)
+            return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score, decision.session_status)
         except Exception:
             success = False
             raise
@@ -193,8 +195,9 @@ async def anthropic_messages(
                     )
 
             if not use_anthropic_native:
-                response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
+                response, cascade_attempts = await _try_with_capability_fallback(
                     proxy, cascade, openai_req, decision, cascade_specialty, available_models,
+                    router=router,
                 )
                 anthropic_resp = openai_to_anthropic_response(
                     response.model_dump(exclude_none=True),
@@ -221,8 +224,9 @@ async def anthropic_messages(
                 success=success,
                 prompt_hash=prompt_hash_val,
                 prompt_preview=prompt_preview_val,
-                judge_reason=judge_reason_val,
                 baseline_model=config.baseline_model,
+                session_status=decision.session_status,
+                session_key=decision.session_key,
             )
 
         return JSONResponse(
@@ -232,6 +236,7 @@ async def anthropic_messages(
                 "X-PolicyFlow-Method": _safe_header(route_method),
                 "X-PolicyFlow-Score": f"{route_score:.3f}",
                 "X-PolicyFlow-Model": openai_req.model,
+                "X-PolicyFlow-Session": decision.session_status or "first",
             },
         )
 
@@ -277,7 +282,6 @@ async def chat_completions(
         prompt_text = str(last_msg)
     prompt_hash_val = hash_prompt(prompt_text) if prompt_text else ""
     prompt_preview_val = prompt_text[:500] if config.log_prompt_preview else ""
-    judge_reason_val = ""
     user = fastapi_request.headers.get("X-User", "default")
     response = None  # Pre-bind for finally block safety
     cascade_attempts = 0
@@ -308,14 +312,17 @@ async def chat_completions(
                 "success": success, "prompt_hash": prompt_hash_val,
                 "prompt_preview": prompt_preview_val,
                 "baseline_model": config.baseline_model,
+                "session_status": decision.session_status,
+                "session_key": decision.session_key,
             }
             wrapped = _stream_with_logging(raw_stream, log_params)
-            return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score)
+            return _stream_response_from_gen(wrapped, route_policy_name, route_method, route_score, decision.session_status)
         else:
             cascade_specialty = decision.policy.name if decision.policy else ""
             available_models = config.available_models
-            response, cascade_attempts, judge_reason_val = await _try_with_capability_fallback(
+            response, cascade_attempts = await _try_with_capability_fallback(
                 proxy, cascade, request, decision, cascade_specialty, available_models,
+                router=router,
             )
     except HTTPException:
         success = False
@@ -339,8 +346,9 @@ async def chat_completions(
             success=success,
             prompt_hash=prompt_hash_val,
             prompt_preview=prompt_preview_val,
-            judge_reason=judge_reason_val,
             baseline_model=config.baseline_model,
+            session_status=decision.session_status,
+            session_key=decision.session_key,
         )
 
     # Return non-streaming response with PolicyFlow routing headers
@@ -350,6 +358,7 @@ async def chat_completions(
             "X-PolicyFlow-Policy": _safe_header(route_policy_name),
             "X-PolicyFlow-Method": _safe_header(route_method),
             "X-PolicyFlow-Score": f"{route_score:.3f}",
+            "X-PolicyFlow-Session": decision.session_status or "first",
         },
     )
 
@@ -367,8 +376,9 @@ def _log_to_db(
     success: bool,
     prompt_hash: str = "",
     prompt_preview: str = "",
-    judge_reason: str = "",
     baseline_model: str = "deepseek-v4-pro",
+    session_status: str = "",
+    session_key: str = "",
 ) -> None:
     """Record the request and its costs to SQLite."""
     prompt_tokens = 0
@@ -398,7 +408,8 @@ def _log_to_db(
             success=success,
             prompt_hash=prompt_hash,
             prompt_preview=prompt_preview,
-            judge_reason=judge_reason,
+            session_status=session_status,
+            session_key=session_key,
         )
     except Exception as exc:
         logger.warning("Failed to log request: %s", exc)
@@ -411,7 +422,8 @@ async def _try_with_capability_fallback(
     decision,
     specialty: str,
     available_models: list[str],
-) -> tuple[ChatCompletionResponse, int, str]:
+    router: Router | None = None,
+) -> tuple[ChatCompletionResponse, int]:
     """Capability model failover: try top-N models by comprehensive scoring.
 
     For capability-routed requests, if the #1 model's providers are all down,
@@ -440,6 +452,7 @@ async def _try_with_capability_fallback(
         try:
             return await _forward_with_cascade(
                 proxy, cascade, request, specialty, available_models,
+                router=router, session_key=decision.session_key,
             )
         except ProxyError as e:
             last_err = e
@@ -454,18 +467,24 @@ async def _forward_with_cascade(
     request: ChatCompletionRequest,
     specialty: str = "",
     available_models: list[str] | None = None,
-) -> tuple[ChatCompletionResponse, int, str]:
+    router: Router | None = None,
+    session_key: str = "",
+) -> tuple[ChatCompletionResponse, int]:
     """Forward request and run rule-based cascade validation.
 
-    Returns (response, cascade_attempts, judge_reason).
-    judge_reason is always "" (kept for call-site compatibility).
+    On a successful escalation, the new model is written back to the router's
+    SessionMemory via ``promote`` so subsequent turns in this conversation use
+    the escalated model — avoiding the same cascade failure every turn.
+
+    Returns (response, cascade_attempts).
     """
     max_attempts = cascade.config.max_retries + 1
     cascade_attempts = 0
+    initial_model = request.model  # Track to detect whether escalation happened
 
     if not cascade.config.enabled:
         response, _ = await proxy.chat_completion_with_fallback(request)
-        return response, 0, ""
+        return response, 0
 
     for attempt in range(max_attempts):
         current_model = request.model
@@ -477,7 +496,11 @@ async def _forward_with_cascade(
 
         validation = cascade.validate(response, request)
         if validation.passed:
-            return response, cascade_attempts, ""
+            # Escalation succeeded — persist the new model so later turns in
+            # this conversation skip the failing cheap model entirely.
+            if router and session_key and current_model != initial_model:
+                router.sessions.promote(session_key, current_model)
+            return response, cascade_attempts
 
         logger.info(
             "Cascade fail [%s]: %s → escalating (attempt %d/%d)",
@@ -486,7 +509,7 @@ async def _forward_with_cascade(
         next_model = cascade.get_next_model(current_model, specialty, available_models)
         if not next_model or attempt >= max_attempts - 1:
             logger.warning("Cascade exhausted, returning last response from %s", current_model)
-            return response, cascade_attempts, ""
+            return response, cascade_attempts
         request.model = next_model
         cascade_attempts += 1
 
@@ -497,42 +520,66 @@ async def _stream_with_logging(
     stream: AsyncIterator[bytes],
     log_params: dict[str, Any],
 ) -> AsyncIterator[bytes]:
-    """Wrap a raw SSE stream: yield chunks, log to DB after stream ends."""
+    """Wrap a raw SSE stream: yield chunks, log token usage after stream ends.
+
+    Token accounting in streaming responses is fiddly:
+
+    - Providers split usage across **multiple events**.  Anthropic's
+      ``message_start`` carries ``input_tokens`` while ``message_delta``
+      carries ``output_tokens`` — naively overwriting the dict on each event
+      with usage erases the input count.  We merge field-by-field via max(),
+      so each piece is captured exactly once.
+
+    - HTTP chunk boundaries do **not** align with SSE event boundaries.  One
+      chunk may hold many events, or half an event whose tail is in the next
+      chunk.  We accumulate raw bytes into a buffer and split on the SSE
+      record terminator (``\\n\\n``) to recover whole events.
+    """
     duration_start = time.time()
-    final_usage: dict[str, int] = {}
+    usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
+    buffer = ""
+
+    def _absorb(payload: dict) -> None:
+        """Merge usage from any object that has a ``usage`` dict.
+
+        Looks at both the top level (Anthropic ``message_delta``) and one
+        level deep under ``message`` (Anthropic ``message_start``).  OpenAI
+        emits ``{usage: {prompt_tokens, completion_tokens}}`` at the top
+        level on its final chunk.
+        """
+        for u in (payload.get("usage"), payload.get("message", {}).get("usage") if isinstance(payload.get("message"), dict) else None):
+            if not isinstance(u, dict):
+                continue
+            pt = u.get("prompt_tokens") or u.get("input_tokens") or 0
+            ct = u.get("completion_tokens") or u.get("output_tokens") or 0
+            if pt: usage["prompt_tokens"] = max(usage["prompt_tokens"], pt)
+            if ct: usage["completion_tokens"] = max(usage["completion_tokens"], ct)
+
     try:
         async for chunk in stream:
             yield chunk
-            # Collect usage from the last SSE data chunk
-            if isinstance(chunk, bytes):
-                try:
-                    text = chunk.decode("utf-8", errors="replace")
-                    # OpenAI SSE: data: {..., "usage": {"prompt_tokens": N, ...}}
-                    # Anthropic SSE: event: message_delta \n data: {..., "usage": {"input_tokens": N, "output_tokens": N}}
-                    if '"usage":' in text:
-                        # Strip SSE prefix if present (handles both "data: " and Anthropic "event: ...\ndata: " patterns)
-                        if text.startswith("data: "):
-                            json_str = text[6:].strip()
-                        elif "data: " in text:
-                            # Anthropic: "event: message_delta\ndata: {...}"
-                            _, _, json_str = text.partition("data: ")
-                            json_str = json_str.strip()
-                        else:
-                            continue
-                        payload = json.loads(json_str)
-                        u = payload.get("usage", {})
-                        if u:
-                            final_usage = {
-                                "prompt_tokens": u.get("prompt_tokens") or u.get("input_tokens", 0),
-                                "completion_tokens": u.get("completion_tokens") or u.get("output_tokens", 0),
-                            }
-                except Exception:
-                    pass
+            if not isinstance(chunk, (bytes, bytearray)):
+                continue
+            buffer += chunk.decode("utf-8", errors="replace")
+            # Split into complete SSE events; keep any trailing partial event
+            # in the buffer for the next chunk to complete.
+            while "\n\n" in buffer:
+                event, buffer = buffer.split("\n\n", 1)
+                for line in event.splitlines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        _absorb(json.loads(data))
+                    except (json.JSONDecodeError, ValueError):
+                        pass
     finally:
         duration_ms = int((time.time() - duration_start) * 1000)
         try:
-            prompt_tokens = final_usage.get("prompt_tokens", 0)
-            completion_tokens = final_usage.get("completion_tokens", 0)
+            prompt_tokens = usage["prompt_tokens"]
+            completion_tokens = usage["completion_tokens"]
             estimated_cost = calc_cost(
                 log_params["routed_model"], prompt_tokens, completion_tokens,
             )
@@ -556,7 +603,8 @@ async def _stream_with_logging(
                 success=log_params.get("success", True),
                 prompt_hash=log_params.get("prompt_hash", ""),
                 prompt_preview=log_params.get("prompt_preview", ""),
-                judge_reason="",
+                session_status=log_params.get("session_status", ""),
+                session_key=log_params.get("session_key", ""),
             )
         except Exception as exc:
             logger.warning("Failed to log streaming request: %s", exc)
@@ -567,6 +615,7 @@ def _stream_response_from_gen(
     policy_name: str,
     method: str,
     score: float,
+    session_status: str = "",
 ) -> StreamingResponse:
     """Return a StreamingResponse from an already-constructed async generator."""
     return StreamingResponse(
@@ -579,6 +628,7 @@ def _stream_response_from_gen(
             "X-PolicyFlow-Policy": _safe_header(policy_name),
             "X-PolicyFlow-Method": _safe_header(method),
             "X-PolicyFlow-Score": f"{score:.3f}",
+            "X-PolicyFlow-Session": session_status or "first",
         },
     )
 

@@ -112,7 +112,7 @@ def _shorten(model: str, n: int) -> str:
 
 # ── Content builders ──────────────────────────────────────────────────
 
-def _stats_table(summary: dict, match_q: dict) -> RichTable:
+def _stats_table(summary: dict, health: dict, sess: dict) -> RichTable:
     saved = summary["saved_amount"]
     sign, clr = ("+", "green") if saved >= 0 else ("", "red")
     t = RichTable.grid(padding=(0, 1))
@@ -122,10 +122,14 @@ def _stats_table(summary: dict, match_q: dict) -> RichTable:
     t.add_row("Cost",      f"¥{summary['total_cost']:,.2f}")
     t.add_row("Saved",     f"[{clr}]{sign}¥{abs(saved):,.2f}[/]")
     t.add_row("",          f"[{clr}]({summary['saved_pct']}%)[/]")
-    for label in ("Direct", "Indirect", "Failed"):
-        n = match_q[label]
-        pct = n / match_q["total"] * 100
-        t.add_row(label, f"{pct:.0f}% ({n})")
+    succ_clr = "green" if health["success_pct"] >= 99 else "yellow" if health["success_pct"] >= 95 else "red"
+    casc_clr = "green" if health["cascade_pct"] <= 2 else "yellow" if health["cascade_pct"] <= 5 else "red"
+    t.add_row("Success", f"[{succ_clr}]{health['success_pct']:.1f}%[/]")
+    t.add_row("Cascade", f"[{casc_clr}]{health['cascade_pct']:.1f}%[/]")
+    sticky_clr = "green" if sess["sticky_pct"] >= 80 else "yellow" if sess["sticky_pct"] >= 50 else "red"
+    t.add_row("Sessions", f"{sess['sessions']:,}")
+    t.add_row("Avg Turns", f"{sess['avg_turns']:.1f}")
+    t.add_row("Sticky", f"[{sticky_clr}]{sess['sticky_pct']:.1f}%[/]")
     t.add_row("",          "")
     t.add_row("[dim]Updated[/]", f"[dim]{datetime.now():%m-%d %H:%M}[/]")
     return t
@@ -510,7 +514,8 @@ class PolicyFlowDashboard(App):
         days = self.days
         summary  = db_module.query_summary(days)
         policies = db_module.query_policy_breakdown(days)
-        match_q  = db_module.query_match_quality(days)
+        health   = db_module.query_health(days)
+        sess     = db_module.query_session_stats(days)
         daily    = db_module.query_daily_costs(days)
         recent   = db_module.query_recent_requests(50)
         capability = db_module.query_capability_breakdown(days)
@@ -532,7 +537,7 @@ class PolicyFlowDashboard(App):
         bar_w   = max(6, right_w - 24)
         label_w = max(8, min(18, w // 6))
 
-        self.query_one("#stats-body",  Static).update(_stats_table(summary, match_q))
+        self.query_one("#stats-body",  Static).update(_stats_table(summary, health, sess))
         self.query_one("#policy-body", Static).update(_policy_table(policies, bar_w))
         self.query_one("#model-body",  Static).update(_model_table(model_rows, bar_w, label_w))
         self.query_one("#capability-body", Static).update(_capability_table(capability, bar_w, label_w))
@@ -549,7 +554,7 @@ class PolicyFlowDashboard(App):
         # Recent
         dt: DataTable = self.query_one("#recent-table", DataTable)
         dt.clear(columns=True)
-        dt.add_columns("Time", "Policy", "Model", "Tok", "Cost")
+        dt.add_columns("Time", "Policy", "Model", "Sess", "Tok", "Cost")
         for r in recent[:50]:
             tok = _si(r.get("prompt_tokens", 0)) + _si(r.get("completion_tokens", 0))
             ts = r.get("timestamp", "")
@@ -557,6 +562,7 @@ class PolicyFlowDashboard(App):
                 ts[5:16] if ts else "",  # MM-DD HH:MM
                 (r.get("policy_name") or "-")[:16],
                 r.get("routed_model", "?")[:18],
+                (r.get("session_status") or "-")[:6],
                 f"{tok // 1000}k" if tok else "-",
                 f"¥{_sf(r.get('estimated_cost', 0)):.3f}",
             )
