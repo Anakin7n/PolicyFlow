@@ -34,6 +34,16 @@ def anthropic_to_chat_request(data: dict[str, Any]) -> ChatCompletionRequest:
     messages = _convert_messages(data)
     tools = _convert_tools(data.get("tools"))
 
+    # Stash the raw Anthropic body for lossless round-trip back to an
+    # Anthropic provider.  The OpenAI intermediate form can't represent
+    # Anthropic-specific metadata like ``cache_control`` markers, so if we
+    # ever need to reverse-convert (cascade fallback, mixed-provider chains),
+    # we just patch ``model`` on the stash instead of rebuilding the body.
+    # The underscore prefix tells the proxy not to forward this key upstream.
+    extra: dict[str, Any] = {"_anthropic_raw": data}
+    if tools:
+        extra["tools"] = tools
+
     return ChatCompletionRequest(
         model=data.get("model", "claude-sonnet-4-6"),
         messages=messages,
@@ -43,7 +53,7 @@ def anthropic_to_chat_request(data: dict[str, Any]) -> ChatCompletionRequest:
         max_tokens=data.get("max_tokens", 1024),
         stop=data.get("stop_sequences"),
         user=data.get("metadata", {}).get("user_id") if isinstance(data.get("metadata"), dict) else None,
-        extra={"tools": tools} if tools else {},
+        extra=extra,
     )
 
 
@@ -222,9 +232,31 @@ def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] |
 def openai_to_anthropic_request(openai_req: ChatCompletionRequest) -> dict[str, Any]:
     """Convert an OpenAI ChatCompletionRequest back to Anthropic Messages body.
 
-    This is the reverse of ``anthropic_to_chat_request`` — used when PolicyFlow
-    routes to a provider with ``protocol: anthropic`` (e.g. api.anthropic.com).
+    Two paths:
+
+    1. **Stashed raw body** (the normal case for ``/v1/messages`` traffic) —
+       the original Anthropic body was preserved by ``anthropic_to_chat_request``
+       in ``extra["_anthropic_raw"]``.  We just clone it and patch ``model``,
+       so every Anthropic-only field (``cache_control`` markers on system /
+       message / tool blocks, ``metadata.user_id``, etc.) survives intact.
+       This is what keeps the upstream prompt cache firing across turns.
+
+    2. **No stash** (a synthetic request that never went through the Anthropic
+       adapter — e.g. constructed by the cascade or a test) — fall back to
+       rebuilding the body from the OpenAI messages.  This path is lossy for
+       Anthropic-specific metadata but at least produces a valid Messages body.
     """
+    raw = (openai_req.extra or {}).get("_anthropic_raw")
+    if isinstance(raw, dict):
+        body = json.loads(json.dumps(raw))  # deep copy; cheap on typical payloads
+        body["model"] = openai_req.model
+        # Keep stream / max_tokens in sync if the pipeline overrode them.
+        body["stream"] = openai_req.stream
+        if openai_req.max_tokens is not None:
+            body["max_tokens"] = openai_req.max_tokens
+        return body
+
+    # ── Fallback: rebuild from OpenAI messages (lossy for cache_control) ──
     messages = list(openai_req.messages)
     system = None
     anthropic_messages: list[dict[str, Any]] = []

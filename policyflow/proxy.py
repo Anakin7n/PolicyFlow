@@ -128,7 +128,13 @@ class UpstreamProxy:
             from .anthropic_adapter import openai_to_anthropic_request
             return openai_to_anthropic_request(request)
         payload = request.model_dump(exclude_none=True, exclude={"extra"})
-        payload.update(request.extra or {})
+        # Merge extra fields, but skip private stashes (underscore-prefixed keys
+        # like ``_anthropic_raw`` — those are internal adapter state, not for
+        # upstream).  Forwarding them would bloat the payload, evict prompt
+        # cache, and at worst trip strict-mode upstreams into 400 errors.
+        for k, v in (request.extra or {}).items():
+            if not k.startswith("_"):
+                payload[k] = v
         return payload
 
     def _parse_anthropic_stream_chunk(self, chunk: bytes) -> list[bytes]:
